@@ -8,11 +8,11 @@ This OAuth SDK provides complete OAuth 2.0 + PKCE authentication for Model Conte
 
 - 🔐 **Complete OAuth 2.1 + PKCE flow** with automatic token exchange
 - 🌐 **Localhost callback server** (auto port detection, defaults to 3000)
-- 🛡️ **Tool protection** with scope-based access control
+- 🛡️ **Dynamic tool protection** with scope-based access control
 - 💾 **Token persistence** across server restarts
 - 🔄 **Dynamic tool refresh** - tools appear/disappear based on authentication
 - 📋 **Universal compatibility** - works with ANY MCP server
-- 🏢 **Multi-provider support** - Hydra
+- 🏢 **Multi-provider support** - Hydra, Auth0, Google, GitHub, Custom
 - 📝 **Complete audit logging** - all actions logged with usernames
 - ⚡ **Zero configuration** for most OAuth providers
 
@@ -39,7 +39,10 @@ This OAuth SDK provides complete OAuth 2.0 + PKCE authentication for Model Conte
 
 ### 1. Install Dependencies
 ```bash
-uv add aiohttp asyncio
+pip install uv  # or your specific dependencies
+```
+```bash
+uv add aiohttp asyncpg  # or your specific dependencies
 ```
 
 ### 2. Add OAuth to Your MCP Server
@@ -118,16 +121,7 @@ oauth_config = create_hydra_config(
     scopes=["read", "admin"]  # Your custom scopes
 )
 ```
-```python
-from mcp_oauth_sdk import OAuthConfig
 
-oauth_config = OAuthConfig(
-    oauth_server="https://your-custom-oauth-server.com",
-    client_id="your-client-id",
-    client_secret="your-client-secret",
-    scopes=["custom:read", "custom:write", "custom:admin"]
-)
-```
 
 ## 🛡️ Tool Protection Patterns
 
@@ -141,6 +135,9 @@ oauth_sdk.protect_tool("admin_operation", scopes=["admin", "superuser"])
 
 # Protect with authentication only (no specific scopes)
 oauth_sdk.protect_tool("user_profile", scopes=[])
+
+# Leave tools unprotected (public access)
+# oauth_sdk.protect_tool("public_info")  # Don't call this = public tool
 ```
 
 ### Advanced Protection with Decorator
@@ -174,13 +171,86 @@ async def handle_call_tool(name: str, arguments: dict):
 
 ### File Server MCP
 ```python
+from mcp.server import Server
+from mcp_oauth_sdk import MCPOAuthSDK, create_hydra_config
+import mcp.types as types
+
+server = Server("file-server")
+
+# Add OAuth
+oauth_config = create_hydra_config("https://oauth.company.com", "file-client", "secret")
+oauth_sdk = MCPOAuthSDK(oauth_config)
+oauth_sdk.register_with_server(server)
+
 # Protect file operations by scope
 oauth_sdk.protect_tool("read_file", scopes=["files:read"])
 oauth_sdk.protect_tool("write_file", scopes=["files:write"])  
 oauth_sdk.protect_tool("delete_file", scopes=["files:admin"])
 oauth_sdk.protect_tool("list_files", scopes=["files:read"])
+# "get_public_info" stays unprotected
 
-# Result: Users only see tools matching their permissions!
+@server.list_tools()
+async def list_tools():
+    return [
+        types.Tool(name="get_public_info", description="Public file server info"),
+        types.Tool(name="list_files", description="List files (read access)"),
+        types.Tool(name="read_file", description="Read file content (read access)"),
+        types.Tool(name="write_file", description="Write file (write access)"),
+        types.Tool(name="delete_file", description="Delete file (admin access)")
+    ]
+
+@server.call_tool()
+async def call_tool(name: str, arguments: dict):
+    user = oauth_sdk.get_current_user()
+    username = user.username if user else "anonymous"
+    
+    if name == "read_file":
+        # User is guaranteed to have "files:read" scope
+        filename = arguments["filename"]
+        content = read_file_from_disk(filename)
+        log_action(f"File '{filename}' read by {username}")
+        return [types.TextContent(type="text", text=content)]
+    
+    # ... other handlers
+```
+
+**Result:** Users only see file tools matching their permissions!
+
+### Database MCP (Like Your Example)
+```python
+from mcp.server import Server
+from mcp_oauth_sdk import MCPOAuthSDK, create_hydra_config
+
+server = Server("database-server")
+
+# Add OAuth (same as your working config)
+oauth_config = create_hydra_config(
+    oauth_server="https://authsec.authnull.com/o",
+    client_id="test-client",
+    client_secret="test-secret",
+    scopes=["mcp:read", "mcp:admin"]
+)
+oauth_sdk = MCPOAuthSDK(oauth_config)
+oauth_sdk.register_with_server(server)
+
+# Protect database operations
+oauth_sdk.protect_tool("execute_query", scopes=["mcp:read"])
+oauth_sdk.protect_tool("get_schema", scopes=["mcp:read"])
+oauth_sdk.protect_tool("export_data", scopes=["mcp:read"])
+oauth_sdk.protect_tool("backup_database", scopes=["mcp:admin"])
+oauth_sdk.protect_tool("admin_maintenance", scopes=["mcp:admin"])
+# "get_server_info" stays public
+
+@server.call_tool()
+async def call_tool(name: str, arguments: dict):
+    if name == "execute_query":
+        # User guaranteed to have mcp:read scope
+        user = oauth_sdk.get_current_user()
+        sql = arguments["query"]
+        results = await execute_safe_query(sql, username=user.username)
+        return [types.TextContent(type="text", text=json.dumps(results))]
+    
+    # ... other handlers work unchanged
 ```
 
 ### API Gateway MCP
@@ -190,15 +260,14 @@ oauth_sdk.protect_tool("call_public_api", scopes=[])  # Any authenticated user
 oauth_sdk.protect_tool("call_partner_api", scopes=["partner"])
 oauth_sdk.protect_tool("call_internal_api", scopes=["internal"])
 oauth_sdk.protect_tool("admin_api", scopes=["admin"])
-```
 
-### Database MCP (Your Example)
-```python
-# Read vs Write vs Admin operations
-oauth_sdk.protect_tool("query_database", scopes=["db:read"])
-oauth_sdk.protect_tool("execute_procedure", scopes=["db:write"])
-oauth_sdk.protect_tool("admin_operation", scopes=["db:admin"])
-oauth_sdk.protect_tool("backup_database", scopes=["db:admin"])
+@server.call_tool()
+async def call_tool(name: str, arguments: dict):
+    if name == "call_internal_api":
+        # User guaranteed to have "internal" scope
+        user = oauth_sdk.get_current_user()
+        response = await call_internal_service(arguments, user_context=user.username)
+        return [types.TextContent(type="text", text=response)]
 ```
 
 ### Multi-Tenant SaaS MCP
@@ -208,6 +277,14 @@ oauth_sdk.protect_tool("tenant_data", scopes=["tenant:read"])
 oauth_sdk.protect_tool("tenant_config", scopes=["tenant:admin"])
 oauth_sdk.protect_tool("billing_info", scopes=["billing:read"])
 oauth_sdk.protect_tool("system_admin", scopes=["system:admin"])
+
+@server.call_tool()
+async def call_tool(name: str, arguments: dict):
+    if name == "tenant_data":
+        user = oauth_sdk.get_current_user()
+        tenant_id = extract_tenant_from_user(user)
+        data = get_tenant_data(tenant_id, user.username)
+        return [types.TextContent(type="text", text=json.dumps(data))]
 ```
 
 ## 🔍 Debugging & Troubleshooting
@@ -218,31 +295,18 @@ import logging
 logging.getLogger("mcp-oauth-sdk").setLevel(logging.DEBUG)
 ```
 
-### Check Authentication Status
-```python
-# In your tool handler
-if oauth_sdk.is_authenticated():
-    user = oauth_sdk.get_current_user()
-    print(f"User: {user.username}, Scopes: {user.scopes}")
-else:
-    print("User not authenticated")
-```
-
-### Debug Tool Visibility
-Add a debug tool to your server:
+### Add Debug Tool to Your Server
 ```python
 @server.list_tools()
 async def list_tools():
-    tools = []
-    
-    # Add debug tool
-    tools.append(types.Tool(
-        name="debug_oauth",
-        description="🔍 Debug OAuth status and tool visibility",
-        inputSchema={"type": "object", "properties": {}}
-    ))
-    
-    # Your other tools...
+    tools = [
+        # Your normal tools...
+        types.Tool(
+            name="debug_oauth",
+            description="🔍 Debug OAuth status and tool visibility",
+            inputSchema={"type": "object", "properties": {}}
+        )
+    ]
     return tools
 
 @server.call_tool()
@@ -253,17 +317,35 @@ async def call_tool(name: str, arguments: dict):
             text=json.dumps({
                 "authenticated": oauth_sdk.is_authenticated(),
                 "user": oauth_sdk.get_current_user().username if oauth_sdk.is_authenticated() else None,
+                "user_scopes": oauth_sdk.get_current_user().scopes if oauth_sdk.is_authenticated() else [],
                 "protected_tools": list(oauth_sdk.protected_tools.keys()),
-                "visible_tools": [tool for tool in oauth_sdk.protected_tools.keys() 
-                                if oauth_sdk._should_show_tool(tool)]
+                "visible_protected_tools": [
+                    tool for tool in oauth_sdk.protected_tools.keys() 
+                    if oauth_sdk._should_show_tool(tool)
+                ],
+                "total_tools_in_system": "Check with 'What tools are available?'"
             }, indent=2)
         )]
+    
+    # Your other tool handlers...
+```
+
+### Check Authentication Status in Code
+```python
+# In your tool handler
+if oauth_sdk.is_authenticated():
+    user = oauth_sdk.get_current_user()
+    print(f"User: {user.username}, Scopes: {user.scopes}")
+else:
+    print("User not authenticated")
 ```
 
 ## 🔧 Advanced Configuration
 
 ### Custom Port Range
 ```python
+from mcp_oauth_sdk import OAuthConfig
+
 oauth_config = OAuthConfig(
     oauth_server="https://oauth.company.com",
     client_id="client-id",
@@ -287,6 +369,7 @@ oauth_config = OAuthConfig(
 ### Environment Variables
 ```python
 import os
+from mcp_oauth_sdk import create_hydra_config
 
 oauth_config = create_hydra_config(
     oauth_server=os.getenv("OAUTH_SERVER", "https://default-oauth.com"),
@@ -296,122 +379,30 @@ oauth_config = create_hydra_config(
 )
 ```
 
-## 🌐 OAuth Provider Setup
-
-### Setting Up Ory Hydra
-1. **Create OAuth Client:**
-   ```bash
-   hydra create client \
-     --endpoint https://your-hydra-admin.com \
-     --client-id your-client-id \
-     --client-secret your-client-secret \
-     --response-types code \
-     --grant-types authorization_code,refresh_token \
-     --scope read,write,admin \
-     --callbacks http://localhost:3000/callback
-   ```
-
-2. **Configure Scopes:**
-   ```yaml
-   # hydra.yml
-   oauth2:
-     scopes:
-       read: "Read access to resources"
-       write: "Write access to resources" 
-       admin: "Administrative access"
-   ```
-
-### Setting Up Auth0
-1. **Create Application** in Auth0 Dashboard
-2. **Application Type:** Regular Web Application
-3. **Allowed Callback URLs:** `http://localhost:3000/callback`
-4. **Grant Types:** Authorization Code, Refresh Token
-5. **Add Custom Scopes** in Auth0 API settings
-
-### Setting Up Google OAuth
-1. **Google Cloud Console** → APIs & Services → Credentials
-2. **Create OAuth 2.0 Client ID**
-3. **Application Type:** Web Application
-4. **Authorized Redirect URIs:** `http://localhost:3000/callback`
-
-## 📊 Production Considerations
-
-### Security
-- ✅ Always use HTTPS in production OAuth servers
-- ✅ Use strong client secrets (OAuth SDK handles PKCE automatically)
-- ✅ Implement proper scope validation in your OAuth provider
-- ✅ Monitor token expiration and refresh flows
-- ✅ Use secure token storage (OAuth SDK handles this)
-
-### Scalability
-- ✅ OAuth SDK is stateless after authentication
-- ✅ Tokens are stored locally per server instance
-- ✅ Multiple MCP servers can use the same OAuth provider
-- ✅ No database required for OAuth SDK operation
-
-### Monitoring
-```python
-# Add metrics to your tools
-@server.call_tool()
-async def call_tool(name: str, arguments: dict):
-    user = oauth_sdk.get_current_user()
-    username = user.username if user else "anonymous"
-    
-    # Log all tool usage with user context
-    logger.info(f"Tool '{name}' called by user '{username}'")
-    
-    # Your existing tool logic...
+### Claude Desktop Configuration
+```json
+{
+  "mcpServers": {
+    "your-server": {
+      "command": "python",
+      "args": ["your_server.py"],
+      "env": {
+        "OAUTH_SERVER": "https://your-oauth-server.com",
+        "OAUTH_CLIENT_ID": "your-client-id",
+        "OAUTH_CLIENT_SECRET": "your-client-secret",
+        "DATABASE_URL": "your-database-connection"
+      }
+    }
+  }
+}
 ```
-
-## 🎯 Migration Guide
-
-### From No Auth to OAuth SDK
-1. **Install OAuth SDK** (no changes to existing tools needed!)
-2. **Add 3 lines** to register OAuth SDK
-3. **Protect sensitive tools** with `oauth_sdk.protect_tool()`
-4. **Test flow** with `oauth_authenticate`
-5. **Deploy!** All existing tools work unchanged
-
-### From Custom Auth to OAuth SDK
-1. **Remove your custom auth code**
-2. **Replace with OAuth SDK** (much simpler!)
-3. **Map your old scopes** to OAuth scopes
-4. **Update tool protection** to use `oauth_sdk.protect_tool()`
-5. **Users get professional OAuth flow** instead of custom auth
-
-## ❓ FAQ
-
-**Q: Does this work with any MCP server?**
-A: Yes! 100% universal. Works with database servers, file servers, API gateways, custom tools, anything.
-
-**Q: Do I need to change my existing tool handlers?**
-A: No! OAuth SDK works transparently. Your existing `@server.call_tool()` handlers work unchanged.
-
-**Q: What if my OAuth provider uses different endpoints?**
-A: OAuth SDK tries multiple common endpoints automatically. For custom providers, just specify the full URLs in `OAuthConfig`.
-
-**Q: Can I use multiple OAuth providers?**
-A: Currently one provider per server instance. For multiple providers, run separate MCP server instances.
-
-**Q: What happens if OAuth server is down?**
-A: Existing authenticated users continue working. New users see "OAuth server unavailable" message. Server stays operational.
-
-**Q: How do I handle token refresh?**
-A: OAuth SDK handles refresh automatically. Tokens are refreshed transparently before expiration.
-
-**Q: Can I customize the OAuth flow UI?**
-A: The OAuth provider controls the auth UI. The callback success/error pages can be customized in the SDK.
-
-**Q: Does this support SSO?**
-A: Yes! If your OAuth provider supports SSO (like Auth0, Okta), users get seamless SSO experience.
-
-## 🔄 Complete Integration Example
 
 Here's a complete example of adding OAuth to any MCP server:
 
 ```python
 import asyncio
 import json
+import logging
 from typing import List
 
 from mcp.server import Server
@@ -422,11 +413,20 @@ import mcp.server.stdio
 # Import OAuth SDK
 from mcp_oauth_sdk import MCPOAuthSDK, create_hydra_config
 
+# Configure logging
+logging.basicConfig(level=logging.INFO, stream=sys.stderr)
+logger = logging.getLogger("my-server")
+
 # Create your MCP server as normal
 server = Server("my-awesome-server")
 
 # ADD OAUTH (3 lines!)
-oauth_config = create_hydra_config("https://oauth.company.com", "client-id", "secret")
+oauth_config = create_hydra_config(
+    oauth_server="https://oauth.company.com", 
+    client_id="your-client-id", 
+    client_secret="your-secret",
+    scopes=["read", "write", "admin"]
+)
 oauth_sdk = MCPOAuthSDK(oauth_config)
 oauth_sdk.register_with_server(server)
 
@@ -441,8 +441,19 @@ async def list_tools() -> List[types.Tool]:
         ),
         types.Tool(
             name="user_data", 
-            description="Get user-specific data (auth required)",
+            description="Get user-specific data (read scope required)",
             inputSchema={"type": "object", "properties": {}}
+        ),
+        types.Tool(
+            name="modify_data",
+            description="Modify data (write scope required)",
+            inputSchema={
+                "type": "object", 
+                "properties": {
+                    "data": {"type": "string", "description": "Data to modify"}
+                },
+                "required": ["data"]
+            }
         ),
         types.Tool(
             name="admin_operation",
@@ -453,34 +464,79 @@ async def list_tools() -> List[types.Tool]:
 
 # Protect the tools you want
 oauth_sdk.protect_tool("user_data", scopes=["read"])
+oauth_sdk.protect_tool("modify_data", scopes=["write"])
 oauth_sdk.protect_tool("admin_operation", scopes=["admin"])
 # public_info stays unprotected
 
 # Your existing tool handlers work unchanged!
 @server.call_tool()
 async def call_tool(name: str, arguments: dict) -> List[types.TextContent]:
+    # Get user context (None if not authenticated)
+    user = oauth_sdk.get_current_user()
+    username = user.username if user else "anonymous"
+    
     if name == "public_info":
-        return [types.TextContent(type="text", text="This is public information")]
+        logger.info(f"Public info accessed by {username}")
+        return [types.TextContent(
+            type="text", 
+            text=json.dumps({
+                "message": "This is public information",
+                "accessed_by": username,
+                "requires_auth": False
+            })
+        )]
     
     elif name == "user_data":
         # OAuth SDK ensures user is authenticated with "read" scope
-        user = oauth_sdk.get_current_user()
+        logger.info(f"User data accessed by {user.username}")
         return [types.TextContent(
             type="text", 
-            text=f"Secret user data for {user.username}"
+            text=json.dumps({
+                "message": f"Secret user data for {user.username}",
+                "user_scopes": user.scopes,
+                "requires_auth": True,
+                "required_scopes": ["read"]
+            })
+        )]
+    
+    elif name == "modify_data":
+        # OAuth SDK ensures user is authenticated with "write" scope
+        data = arguments.get("data", "")
+        logger.info(f"Data modified by {user.username}: {data}")
+        return [types.TextContent(
+            type="text",
+            text=json.dumps({
+                "message": f"Data '{data}' modified by {user.username}",
+                "operation": "modify",
+                "requires_auth": True,
+                "required_scopes": ["write"]
+            })
         )]
     
     elif name == "admin_operation":
         # OAuth SDK ensures user is authenticated with "admin" scope
-        user = oauth_sdk.get_current_user()
+        logger.info(f"Admin operation performed by {user.username}")
         return [types.TextContent(
             type="text",
-            text=f"Admin operation performed by {user.username}"
+            text=json.dumps({
+                "message": f"Admin operation performed by {user.username}",
+                "operation": "admin",
+                "requires_auth": True,
+                "required_scopes": ["admin"],
+                "elevated_privileges": True
+            })
+        )]
+    
+    else:
+        return [types.TextContent(
+            type="text",
+            text=json.dumps({"error": f"Unknown tool: {name}"})
         )]
 
 # Run server as normal
 async def main():
     async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
+        logger.info("🚀 Server starting with OAuth authentication")
         await server.run(
             read_stream,
             write_stream, 
@@ -497,20 +553,4 @@ async def main():
 if __name__ == "__main__":
     asyncio.run(main())
 ```
-
-## 🏆 Result
-
-**Before OAuth SDK:** Anyone can use all tools, no security, no audit trail
-**After OAuth SDK:** Enterprise-grade security with 3 lines of code! 
-
-- ✅ Users must authenticate via professional OAuth flow
-- ✅ Tools appear/disappear based on user permissions  
-- ✅ Complete audit trail with usernames
-- ✅ Scope-based access control
-- ✅ Zero changes to existing tool code
-- ✅ Production-ready security
-
-**Transform any MCP server into an enterprise-ready authenticated service in minutes!** 🚀
-
----
 

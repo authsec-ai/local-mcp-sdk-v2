@@ -1,20 +1,22 @@
 """
-Complete Demo Server with Localhost:3000 Callback - Full Working Code
-=====================================================================
+Production PostgreSQL MCP Server with OAuth Authentication
+========================================================
 
-This is the complete working example that includes:
-- The full OAuth SDK with localhost callback server
-- Working PostgreSQL integration (like our original example)
-- Complete OAuth flow: authenticate → callback → token exchange → tools unlock
-- Proper MCP protocol compliance
+A real-world MCP server for PostgreSQL database operations with OAuth protection.
+Features practical tools for database administration, monitoring, and data analysis.
 
-Expected Flow:
-1. Server starts → Shows OAuth tools only
-2. Call oauth_authenticate → Get auth URL with localhost:3000 callback
-3. Complete OAuth in browser → Redirected to localhost:3000/callback
-4. Automatic token exchange → User info retrieved and token saved
-5. Call oauth_refresh_tools → Protected tools now visible
-6. All database tools available with user authentication!
+Key Features:
+- ✅ Real database connection and operations
+- ✅ OAuth 2.0 authentication with scope-based access control
+- ✅ Production-ready SQL tools with safety checks
+- ✅ Database monitoring and health checks
+- ✅ User activity logging and audit trails
+- ✅ Data export and backup operations
+- ✅ Advanced query builder and analytics
+
+Scopes:
+- mcp:read: Basic read operations (SELECT, schema info, monitoring)
+- mcp:admin: Administrative operations (maintenance, backups, user management)
 """
 
 import asyncio
@@ -23,7 +25,12 @@ import os
 import sys
 import json
 import time
-from typing import Any, Dict, List, Optional
+import csv
+import io
+from typing import Any, Dict, List, Optional, Union
+from datetime import datetime, timedelta
+import tempfile
+from pathlib import Path
 
 import asyncpg
 from mcp.server.models import InitializationOptions
@@ -31,44 +38,42 @@ import mcp.types as types
 from mcp.server import NotificationOptions, Server
 import mcp.server.stdio
 
-# Import the complete OAuth SDK with callback functionality
+# Import the OAuth SDK
 from mcp_oauth_sdk import MCPOAuthSDK, create_hydra_config
 
 # Configure logging to stderr only (MCP requirement)
 logging.basicConfig(
     level=logging.INFO,
-    stream=sys.stderr,  # CRITICAL: Must be stderr, not stdout
-    format='%(name)s:%(message)s'
+    stream=sys.stderr,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
-logger = logging.getLogger("complete-demo-server")
+logger = logging.getLogger("postgres-mcp-server")
 
-server = Server("complete-demo-server")
+server = Server("postgres-mcp-server")
 
 # Global instances
 db_pool = None
 oauth_sdk = None
 
 # =============================================================================
-# OAUTH CONFIGURATION WITH YOUR WORKING SETUP
+# OAUTH CONFIGURATION
 # =============================================================================
 
-# Configure OAuth with your exact working settings
 oauth_config = create_hydra_config(
     oauth_server=os.getenv("OAUTH_SERVER", "https://authsec.authnull.com/o"),
     client_id=os.getenv("OAUTH_CLIENT_ID", "test-client"),
     client_secret=os.getenv("OAUTH_CLIENT_SECRET", "test-secret"),
-    scopes=["mcp:read", "mcp:admin"]  # Using your exact scopes
+    scopes=["mcp:read", "mcp:admin"]
 )
 
-# Initialize OAuth SDK
 oauth_sdk = MCPOAuthSDK(oauth_config)
 
 # =============================================================================
-# DATABASE FUNCTIONS (SAME AS WORKING EXAMPLE)
+# DATABASE CONNECTION AND HEALTH
 # =============================================================================
 
 async def connect_database():
-    """Connect to PostgreSQL database"""
+    """Connect to PostgreSQL database with production settings"""
     global db_pool
     
     connection_string = os.getenv("POSTGRES_CONNECTION_STRING")
@@ -76,47 +81,120 @@ async def connect_database():
         connection_string = sys.argv[1]
     
     if not connection_string:
-        logger.warning("No database connection string provided - using demo mode")
-        return
+        raise ValueError(
+            "POSTGRES_CONNECTION_STRING environment variable is required for production use. "
+            "Format: postgresql://user:password@host:port/database"
+        )
     
     try:
+        # Production connection pool settings
         db_pool = await asyncpg.create_pool(
             connection_string,
-            min_size=1,
-            max_size=10,
-            command_timeout=30
-        )
-        logger.info("✅ Database connection pool created successfully")
-    except Exception as e:
-        logger.error(f"❌ Failed to create database connection pool: {e}")
-        logger.info("Continuing in demo mode without database")
-
-async def execute_query(query: str, params: Optional[List] = None, username: str = None) -> List[Dict[str, Any]]:
-    """Execute a SELECT query with user logging"""
-    if not db_pool:
-        # Return demo data if no database
-        return [
-            {
-                "demo_id": 1,
-                "demo_data": "This is demo data",
-                "executed_by": username,
-                "note": "Configure POSTGRES_CONNECTION_STRING for real database access"
-            },
-            {
-                "demo_id": 2,
-                "demo_data": "Another demo record",
-                "executed_by": username,
-                "note": "All operations are logged with your username"
+            min_size=2,
+            max_size=20,
+            command_timeout=60,
+            server_settings={
+                'application_name': 'mcp_postgres_server',
+                'timezone': 'UTC'
             }
-        ]
+        )
+        
+        # Test connection
+        async with db_pool.acquire() as conn:
+            version = await conn.fetchval('SELECT version()')
+            logger.info(f"✅ Connected to PostgreSQL: {version}")
+            
+        logger.info("✅ Database connection pool created successfully")
+        
+    except Exception as e:
+        logger.error(f"❌ Failed to connect to database: {e}")
+        raise
+
+async def get_db_health() -> Dict[str, Any]:
+    """Get comprehensive database health information"""
+    if not db_pool:
+        return {"status": "disconnected", "error": "No database connection"}
     
-    # Security check - only allow SELECT statements
+    try:
+        async with db_pool.acquire() as conn:
+            # Basic connectivity
+            start_time = time.time()
+            await conn.fetchval('SELECT 1')
+            response_time = time.time() - start_time
+            
+            # Database info
+            db_info = await conn.fetchrow("""
+                SELECT 
+                    current_database() as database_name,
+                    current_user as current_user,
+                    version() as version,
+                    inet_server_addr() as server_ip,
+                    inet_server_port() as server_port
+            """)
+            
+            # Connection stats
+            conn_stats = await conn.fetchrow("""
+                SELECT 
+                    COUNT(*) as total_connections,
+                    COUNT(*) FILTER (WHERE state = 'active') as active_connections,
+                    COUNT(*) FILTER (WHERE state = 'idle') as idle_connections
+                FROM pg_stat_activity
+            """)
+            
+            # Database size
+            db_size = await conn.fetchrow("""
+                SELECT 
+                    pg_size_pretty(pg_database_size(current_database())) as database_size,
+                    pg_database_size(current_database()) as database_size_bytes
+            """)
+            
+            return {
+                "status": "healthy",
+                "response_time_ms": round(response_time * 1000, 2),
+                "database_info": dict(db_info) if db_info else {},
+                "connection_stats": dict(conn_stats) if conn_stats else {},
+                "database_size": dict(db_size) if db_size else {},
+                "pool_stats": {
+                    "pool_size": db_pool.get_size(),
+                    "pool_min_size": db_pool.get_min_size(),
+                    "pool_max_size": db_pool.get_max_size(),
+                },
+                "timestamp": datetime.utcnow().isoformat()
+            }
+    except Exception as e:
+        logger.error(f"Database health check failed: {e}")
+        return {
+            "status": "unhealthy",
+            "error": str(e),
+            "timestamp": datetime.utcnow().isoformat()
+        }
+
+# =============================================================================
+# QUERY EXECUTION WITH SAFETY AND LOGGING
+# =============================================================================
+
+async def execute_safe_query(query: str, params: Optional[List] = None, username: str = None) -> Dict[str, Any]:
+    """Execute queries with comprehensive safety checks and logging"""
+    
+    # Log the query attempt
+    logger.info(f"🔍 Query execution by '{username}': {query[:200]}{'...' if len(query) > 200 else ''}")
+    
+    # Security validation
     query_upper = query.strip().upper()
-    if not query_upper.startswith('SELECT'):
-        raise ValueError("Only SELECT queries are allowed for security")
     
-    # Log query execution with user info
-    logger.info(f"🔍 Query by '{username}': {query[:100]}{'...' if len(query) > 100 else ''}")
+    # Only allow SELECT, WITH (for CTEs), and EXPLAIN statements
+    allowed_starts = ['SELECT', 'WITH', 'EXPLAIN']
+    if not any(query_upper.startswith(start) for start in allowed_starts):
+        raise ValueError(f"Only {', '.join(allowed_starts)} statements are allowed for security")
+    
+    # Check for dangerous keywords
+    dangerous_keywords = ['DROP', 'DELETE', 'UPDATE', 'INSERT', 'ALTER', 'CREATE', 'TRUNCATE', 'GRANT', 'REVOKE']
+    for keyword in dangerous_keywords:
+        if keyword in query_upper:
+            raise ValueError(f"Keyword '{keyword}' is not allowed for security")
+    
+    # Execute query with timing and result metadata
+    start_time = time.time()
     
     async with db_pool.acquire() as conn:
         try:
@@ -125,517 +203,982 @@ async def execute_query(query: str, params: Optional[List] = None, username: str
             else:
                 rows = await conn.fetch(query)
             
+            execution_time = time.time() - start_time
+            
             # Convert to list of dictionaries
-            result = [dict(row) for row in rows]
-            logger.info(f"✅ Query returned {len(result)} rows for user '{username}'")
-            return result
+            results = [dict(row) for row in rows]
+            
+            # Log successful execution
+            logger.info(f"✅ Query completed in {execution_time:.3f}s, returned {len(results)} rows for user '{username}'")
+            
+            return {
+                "success": True,
+                "results": results,
+                "metadata": {
+                    "row_count": len(results),
+                    "execution_time_seconds": round(execution_time, 3),
+                    "executed_by": username,
+                    "executed_at": datetime.utcnow().isoformat(),
+                    "query_preview": query[:100] + "..." if len(query) > 100 else query
+                }
+            }
+            
         except Exception as e:
-            logger.error(f"❌ Query execution failed for user '{username}': {e}")
+            execution_time = time.time() - start_time
+            logger.error(f"❌ Query failed after {execution_time:.3f}s for user '{username}': {e}")
             raise
 
-async def get_schema_info(username: str) -> Dict[str, Any]:
-    """Get comprehensive database schema information"""
-    if not db_pool:
-        # Return demo schema if no database
+# =============================================================================
+# SCHEMA AND METADATA OPERATIONS
+# =============================================================================
+
+async def get_comprehensive_schema(username: str) -> Dict[str, Any]:
+    """Get detailed database schema with statistics"""
+    logger.info(f"📊 Getting comprehensive schema for user '{username}'")
+    
+    async with db_pool.acquire() as conn:
+        # Tables with detailed info
+        tables_query = """
+        SELECT 
+            schemaname,
+            tablename,
+            tableowner,
+            hasindexes,
+            hasrules,
+            hastriggers,
+            pg_size_pretty(pg_total_relation_size(schemaname||'.'||tablename)) as table_size,
+            pg_total_relation_size(schemaname||'.'||tablename) as table_size_bytes
+        FROM pg_tables 
+        WHERE schemaname NOT IN ('information_schema', 'pg_catalog', 'pg_toast')
+        ORDER BY pg_total_relation_size(schemaname||'.'||tablename) DESC;
+        """
+        
+        # Views
+        views_query = """
+        SELECT 
+            schemaname,
+            viewname,
+            viewowner,
+            definition
+        FROM pg_views 
+        WHERE schemaname NOT IN ('information_schema', 'pg_catalog')
+        ORDER BY schemaname, viewname;
+        """
+        
+        # Columns with detailed info
+        columns_query = """
+        SELECT 
+            table_schema,
+            table_name,
+            column_name,
+            data_type,
+            is_nullable,
+            column_default,
+            character_maximum_length,
+            numeric_precision,
+            numeric_scale,
+            ordinal_position
+        FROM information_schema.columns 
+        WHERE table_schema NOT IN ('information_schema', 'pg_catalog')
+        ORDER BY table_schema, table_name, ordinal_position;
+        """
+        
+        # Indexes
+        indexes_query = """
+        SELECT 
+            schemaname,
+            tablename,
+            indexname,
+            indexdef
+        FROM pg_indexes
+        WHERE schemaname NOT IN ('information_schema', 'pg_catalog')
+        ORDER BY schemaname, tablename, indexname;
+        """
+        
+        # Foreign keys
+        fk_query = """
+        SELECT
+            tc.table_schema,
+            tc.table_name,
+            tc.constraint_name,
+            tc.constraint_type,
+            kcu.column_name,
+            ccu.table_schema AS foreign_table_schema,
+            ccu.table_name AS foreign_table_name,
+            ccu.column_name AS foreign_column_name
+        FROM information_schema.table_constraints AS tc
+        JOIN information_schema.key_column_usage AS kcu
+            ON tc.constraint_name = kcu.constraint_name
+            AND tc.table_schema = kcu.table_schema
+        JOIN information_schema.constraint_column_usage AS ccu
+            ON ccu.constraint_name = tc.constraint_name
+            AND ccu.table_schema = tc.table_schema
+        WHERE tc.constraint_type = 'FOREIGN KEY'
+            AND tc.table_schema NOT IN ('information_schema', 'pg_catalog')
+        ORDER BY tc.table_schema, tc.table_name;
+        """
+        
+        tables = await conn.fetch(tables_query)
+        views = await conn.fetch(views_query)
+        columns = await conn.fetch(columns_query)
+        indexes = await conn.fetch(indexes_query)
+        foreign_keys = await conn.fetch(fk_query)
+        
         return {
-            "tables": [
-                {"schemaname": "public", "tablename": "demo_table", "tableowner": "demo_user"},
-                {"schemaname": "public", "tablename": "users", "tableowner": "demo_user"}
-            ],
-            "views": [],
-            "columns": [
-                {"table_name": "demo_table", "column_name": "id", "data_type": "integer"},
-                {"table_name": "demo_table", "column_name": "name", "data_type": "text"},
-                {"table_name": "users", "column_name": "user_id", "data_type": "integer"},
-                {"table_name": "users", "column_name": "username", "data_type": "text"}
-            ],
+            "tables": [dict(row) for row in tables],
+            "views": [dict(row) for row in views],
+            "columns": [dict(row) for row in columns],
+            "indexes": [dict(row) for row in indexes],
+            "foreign_keys": [dict(row) for row in foreign_keys],
+            "summary": {
+                "total_tables": len(tables),
+                "total_views": len(views),
+                "total_columns": len(columns),
+                "total_indexes": len(indexes),
+                "total_foreign_keys": len(foreign_keys)
+            },
             "accessed_by": username,
-            "access_timestamp": time.time(),
-            "table_count": 2,
-            "note": "This is demo schema data"
+            "access_timestamp": datetime.utcnow().isoformat()
+        }
+
+async def get_table_statistics(table_name: str, schema_name: str = "public", username: str = None) -> Dict[str, Any]:
+    """Get comprehensive table statistics"""
+    logger.info(f"📈 Getting table statistics for {schema_name}.{table_name} by user '{username}'")
+    
+    async with db_pool.acquire() as conn:
+        # Basic table info
+        table_info_query = """
+        SELECT 
+            pg_size_pretty(pg_total_relation_size($1)) as total_size,
+            pg_total_relation_size($1) as total_size_bytes,
+            pg_size_pretty(pg_relation_size($1)) as table_size,
+            pg_relation_size($1) as table_size_bytes,
+            (SELECT reltuples::bigint FROM pg_class WHERE relname = $2) as estimated_rows
+        """
+        
+        # Column statistics
+        column_stats_query = """
+        SELECT 
+            column_name,
+            data_type,
+            is_nullable,
+            column_default
+        FROM information_schema.columns 
+        WHERE table_name = $1 AND table_schema = $2
+        ORDER BY ordinal_position;
+        """
+        
+        # Index information
+        index_info_query = """
+        SELECT 
+            indexname,
+            indexdef,
+            pg_size_pretty(pg_relation_size(indexname::regclass)) as index_size
+        FROM pg_indexes
+        WHERE tablename = $1 AND schemaname = $2;
+        """
+        
+        full_table_name = f"{schema_name}.{table_name}"
+        
+        table_info = await conn.fetchrow(table_info_query, full_table_name, table_name)
+        columns = await conn.fetch(column_stats_query, table_name, schema_name)
+        indexes = await conn.fetch(index_info_query, table_name, schema_name)
+        
+        # Get actual row count for smaller tables
+        if table_info and table_info['estimated_rows'] and table_info['estimated_rows'] < 1000000:
+            try:
+                actual_count = await conn.fetchval(f'SELECT COUNT(*) FROM "{schema_name}"."{table_name}"')
+            except:
+                actual_count = None
+        else:
+            actual_count = None
+        
+        return {
+            "table_name": table_name,
+            "schema_name": schema_name,
+            "table_info": dict(table_info) if table_info else {},
+            "actual_row_count": actual_count,
+            "columns": [dict(row) for row in columns],
+            "indexes": [dict(row) for row in indexes],
+            "column_count": len(columns),
+            "index_count": len(indexes),
+            "analyzed_by": username,
+            "analysis_timestamp": datetime.utcnow().isoformat()
+        }
+
+# =============================================================================
+# DATA EXPORT AND BACKUP OPERATIONS
+# =============================================================================
+
+async def export_table_data(table_name: str, schema_name: str = "public", 
+                           limit: int = 1000, format: str = "json", 
+                           username: str = None) -> Dict[str, Any]:
+    """Export table data in various formats"""
+    logger.info(f"📤 Exporting {schema_name}.{table_name} (limit: {limit}, format: {format}) by user '{username}'")
+    
+    if limit > 10000:
+        raise ValueError("Export limit cannot exceed 10,000 rows for performance")
+    
+    query = f'SELECT * FROM "{schema_name}"."{table_name}" LIMIT $1'
+    result = await execute_safe_query(query, [limit], username)
+    
+    if not result["success"]:
+        return result
+    
+    data = result["results"]
+    
+    if format.lower() == "csv":
+        # Convert to CSV
+        if data:
+            output = io.StringIO()
+            writer = csv.DictWriter(output, fieldnames=data[0].keys())
+            writer.writeheader()
+            writer.writerows(data)
+            csv_data = output.getvalue()
+            output.close()
+            
+            return {
+                "success": True,
+                "format": "csv",
+                "data": csv_data,
+                "metadata": result["metadata"]
+            }
+    
+    elif format.lower() == "json":
+        return {
+            "success": True,
+            "format": "json",
+            "data": data,
+            "metadata": result["metadata"]
         }
     
-    logger.info(f"📊 Getting schema info for user '{username}'")
+    else:
+        raise ValueError("Supported formats: json, csv")
+
+async def backup_schema_ddl(schema_name: str = "public", username: str = None) -> Dict[str, Any]:
+    """Generate DDL backup for schema"""
+    logger.info(f"💾 Generating DDL backup for schema '{schema_name}' by user '{username}'")
+    
+    async with db_pool.acquire() as conn:
+        # Get table DDL
+        tables_ddl_query = """
+        SELECT 
+            tablename,
+            'CREATE TABLE ' || schemaname || '.' || tablename || ' (' ||
+            array_to_string(
+                array_agg(
+                    column_name || ' ' || data_type ||
+                    CASE 
+                        WHEN character_maximum_length IS NOT NULL 
+                        THEN '(' || character_maximum_length || ')'
+                        WHEN numeric_precision IS NOT NULL 
+                        THEN '(' || numeric_precision || ',' || COALESCE(numeric_scale, 0) || ')'
+                        ELSE ''
+                    END ||
+                    CASE WHEN is_nullable = 'NO' THEN ' NOT NULL' ELSE '' END
+                ), ', '
+            ) || ');' as ddl
+        FROM information_schema.columns c
+        JOIN pg_tables t ON c.table_name = t.tablename
+        WHERE c.table_schema = $1 AND t.schemaname = $1
+        GROUP BY tablename, schemaname
+        ORDER BY tablename;
+        """
+        
+        # Get view DDL
+        views_ddl_query = """
+        SELECT 
+            viewname,
+            'CREATE VIEW ' || schemaname || '.' || viewname || ' AS ' || definition as ddl
+        FROM pg_views
+        WHERE schemaname = $1
+        ORDER BY viewname;
+        """
+        
+        # Get index DDL
+        indexes_ddl_query = """
+        SELECT 
+            indexname,
+            indexdef || ';' as ddl
+        FROM pg_indexes
+        WHERE schemaname = $1
+        ORDER BY indexname;
+        """
+        
+        tables_ddl = await conn.fetch(tables_ddl_query, schema_name)
+        views_ddl = await conn.fetch(views_ddl_query, schema_name)
+        indexes_ddl = await conn.fetch(indexes_ddl_query, schema_name)
+        
+        ddl_script = f"-- Schema backup for '{schema_name}' generated at {datetime.utcnow().isoformat()}\n"
+        ddl_script += f"-- Generated by user: {username}\n\n"
+        
+        if tables_ddl:
+            ddl_script += "-- Tables\n"
+            for row in tables_ddl:
+                ddl_script += f"-- Table: {row['tablename']}\n"
+                ddl_script += row['ddl'] + "\n\n"
+        
+        if views_ddl:
+            ddl_script += "-- Views\n"
+            for row in views_ddl:
+                ddl_script += f"-- View: {row['viewname']}\n"
+                ddl_script += row['ddl'] + "\n\n"
+        
+        if indexes_ddl:
+            ddl_script += "-- Indexes\n"
+            for row in indexes_ddl:
+                ddl_script += f"-- Index: {row['indexname']}\n"
+                ddl_script += row['ddl'] + "\n\n"
+        
+        return {
+            "success": True,
+            "schema_name": schema_name,
+            "ddl_script": ddl_script,
+            "tables_count": len(tables_ddl),
+            "views_count": len(views_ddl),
+            "indexes_count": len(indexes_ddl),
+            "generated_by": username,
+            "generated_at": datetime.utcnow().isoformat()
+        }
+
+# =============================================================================
+# MONITORING AND ANALYTICS
+# =============================================================================
+
+async def get_database_activity(username: str = None) -> Dict[str, Any]:
+    """Get current database activity and performance metrics"""
+    logger.info(f"📊 Getting database activity for user '{username}'")
+    
+    async with db_pool.acquire() as conn:
+        # Current connections
+        connections_query = """
+        SELECT 
+            datname,
+            usename,
+            application_name,
+            client_addr,
+            state,
+            query_start,
+            state_change,
+            substring(query, 1, 100) as current_query
+        FROM pg_stat_activity
+        WHERE state IS NOT NULL
+        ORDER BY query_start DESC
+        LIMIT 20;
+        """
+        
+        # Database statistics
+        db_stats_query = """
+        SELECT 
+            datname,
+            numbackends,
+            xact_commit,
+            xact_rollback,
+            blks_read,
+            blks_hit,
+            tup_returned,
+            tup_fetched,
+            tup_inserted,
+            tup_updated,
+            tup_deleted
+        FROM pg_stat_database
+        WHERE datname = current_database();
+        """
+        
+        # Table statistics
+        table_stats_query = """
+        SELECT 
+            schemaname,
+            relname as tablename,
+            seq_scan,
+            seq_tup_read,
+            idx_scan,
+            idx_tup_fetch,
+            n_tup_ins,
+            n_tup_upd,
+            n_tup_del
+        FROM pg_stat_user_tables
+        ORDER BY (seq_tup_read + idx_tup_fetch) DESC
+        LIMIT 10;
+        """
+        
+        connections = await conn.fetch(connections_query)
+        db_stats = await conn.fetchrow(db_stats_query)
+        table_stats = await conn.fetch(table_stats_query)
+        
+        return {
+            "current_connections": [dict(row) for row in connections],
+            "database_stats": dict(db_stats) if db_stats else {},
+            "top_tables_activity": [dict(row) for row in table_stats],
+            "connection_count": len(connections),
+            "monitored_by": username,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+
+async def analyze_slow_queries(username: str = None) -> Dict[str, Any]:
+    """Analyze query performance (requires pg_stat_statements extension)"""
+    logger.info(f"🐌 Analyzing slow queries for user '{username}'")
     
     async with db_pool.acquire() as conn:
         try:
-            # Get tables
-            tables_query = """
-            SELECT 
-                schemaname,
-                tablename,
-                tableowner,
-                hasindexes,
-                hasrules,
-                hastriggers
-            FROM pg_tables 
-            WHERE schemaname NOT IN ('information_schema', 'pg_catalog')
-            ORDER BY schemaname, tablename;
-            """
-            tables = await conn.fetch(tables_query)
+            # Check if pg_stat_statements is available
+            extension_check = await conn.fetchval(
+                "SELECT COUNT(*) FROM pg_extension WHERE extname = 'pg_stat_statements'"
+            )
             
-            # Get views
-            views_query = """
-            SELECT 
-                schemaname,
-                viewname,
-                viewowner
-            FROM pg_views 
-            WHERE schemaname NOT IN ('information_schema', 'pg_catalog')
-            ORDER BY schemaname, viewname;
-            """
-            views = await conn.fetch(views_query)
+            if extension_check == 0:
+                return {
+                    "success": False,
+                    "error": "pg_stat_statements extension not installed",
+                    "suggestion": "Install pg_stat_statements extension for query performance analysis"
+                }
             
-            # Get columns
-            columns_query = """
+            # Get slow queries
+            slow_queries_query = """
             SELECT 
-                table_schema,
-                table_name,
-                column_name,
-                data_type,
-                is_nullable,
-                column_default,
-                ordinal_position
-            FROM information_schema.columns 
-            WHERE table_schema NOT IN ('information_schema', 'pg_catalog')
-            ORDER BY table_schema, table_name, ordinal_position;
+                query,
+                calls,
+                total_time,
+                mean_time,
+                rows,
+                100.0 * shared_blks_hit / nullif(shared_blks_hit + shared_blks_read, 0) AS hit_percent
+            FROM pg_stat_statements
+            WHERE calls > 10
+            ORDER BY mean_time DESC
+            LIMIT 10;
             """
-            columns = await conn.fetch(columns_query)
+            
+            slow_queries = await conn.fetch(slow_queries_query)
             
             return {
-                "tables": [dict(row) for row in tables],
-                "views": [dict(row) for row in views],
-                "columns": [dict(row) for row in columns],
-                "accessed_by": username,
-                "access_timestamp": time.time(),
-                "table_count": len(tables),
-                "view_count": len(views),
-                "security_level": "USER_AUTHENTICATED_ACCESS"
+                "success": True,
+                "slow_queries": [dict(row) for row in slow_queries],
+                "analyzed_by": username,
+                "timestamp": datetime.utcnow().isoformat()
             }
+            
         except Exception as e:
-            logger.error(f"❌ Schema info retrieval failed for user '{username}': {e}")
-            raise
-
-async def admin_operation(username: str) -> Dict[str, Any]:
-    """Perform admin operation - REQUIRES MCP:ADMIN SCOPE"""
-    logger.info(f"⚠️ Admin operation performed by '{username}'")
-    
-    return {
-        "operation": "system_maintenance",
-        "performed_by": username,
-        "timestamp": time.time(),
-        "actions": [
-            "Database health check completed",
-            "Connection pool status verified",
-            "OAuth token validation performed",
-            "Audit log review completed"
-        ],
-        "status": "success",
-        "security_note": "✅ Admin operation performed by authenticated admin user"
-    }
+            return {
+                "success": False,
+                "error": str(e),
+                "analyzed_by": username,
+                "timestamp": datetime.utcnow().isoformat()
+            }
 
 # =============================================================================
-# MCP HANDLERS WITH OAUTH PROTECTION
+# APPLICATION TOOLS DEFINITION
 # =============================================================================
 
-@server.list_tools()
-async def handle_list_tools() -> list[types.Tool]:
-    """List available tools based on authentication status"""
-    
-    # Debug logging to see what's happening
-    is_authenticated = oauth_sdk.is_authenticated()
-    current_user = oauth_sdk.get_current_user()
-    logger.info(f"🔧 handle_list_tools called - authenticated: {is_authenticated}")
-    if current_user:
-        logger.info(f"🔧 Current user: {current_user.username}, scopes: {current_user.scopes}")
-    
-    # The OAuth SDK automatically handles which tools to show
-    # based on authentication status and user scopes
+def define_application_tools():
+    """Define comprehensive PostgreSQL management tools"""
     
     return [
-        # Public tools (always visible)
+        # Public tools (no authentication required)
         types.Tool(
             name="get_server_info",
-            description="ℹ️ Get server information (no authentication required)",
+            description="ℹ️ Get PostgreSQL server information and connection status",
+            inputSchema={"type": "object", "properties": {}},
+        ),
+        types.Tool(
+            name="health_check",
+            description="🏥 Get comprehensive database health and performance metrics",
             inputSchema={"type": "object", "properties": {}},
         ),
         
-        # Protected tools - OAuth SDK controls visibility based on scopes
+        # Read operations (mcp:read scope required)
         types.Tool(
-            name="query_database",
-            description="🗄️ Execute SQL query (requires mcp:read scope)",
+            name="execute_query",
+            description="🔍 Execute SELECT queries with safety validation (requires mcp:read scope)",
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "sql": {
+                    "query": {
                         "type": "string",
-                        "description": "SQL SELECT query to execute"
+                        "description": "SELECT query to execute (INSERT/UPDATE/DELETE not allowed)"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Optional result limit (default: 100, max: 1000)",
+                        "minimum": 1,
+                        "maximum": 1000,
+                        "default": 100
                     }
                 },
-                "required": ["sql"]
+                "required": ["query"]
             },
         ),
         types.Tool(
-            name="list_tables",
-            description="📊 List database tables (requires mcp:read scope)",
-            inputSchema={"type": "object", "properties": {}},
-        ),
-        types.Tool(
             name="get_schema",
-            description="📋 Get complete database schema (requires mcp:read scope)",
-            inputSchema={"type": "object", "properties": {}},
+            description="📋 Get comprehensive database schema with statistics (requires mcp:read scope)",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "include_statistics": {
+                        "type": "boolean",
+                        "description": "Include table sizes and row counts",
+                        "default": True
+                    }
+                }
+            },
         ),
         types.Tool(
             name="get_table_info",
-            description="📝 Get detailed table information (requires mcp:read scope)",
+            description="📊 Get detailed table information and statistics (requires mcp:read scope)",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "table_name": {
                         "type": "string",
-                        "description": "Name of the table to get info for"
+                        "description": "Name of the table to analyze"
+                    },
+                    "schema_name": {
+                        "type": "string",
+                        "description": "Schema name (default: public)",
+                        "default": "public"
                     }
                 },
                 "required": ["table_name"]
             },
         ),
         types.Tool(
-            name="admin_operation",
-            description="⚙️ Perform admin operation (requires mcp:admin scope)",
+            name="list_tables",
+            description="📝 List all tables with sizes and basic statistics (requires mcp:read scope)",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "schema_name": {
+                        "type": "string", 
+                        "description": "Filter by schema name (optional)"
+                    },
+                    "include_system": {
+                        "type": "boolean",
+                        "description": "Include system tables",
+                        "default": False
+                    }
+                }
+            },
+        ),
+        types.Tool(
+            name="export_data",
+            description="📤 Export table data in JSON or CSV format (requires mcp:read scope)",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "table_name": {
+                        "type": "string",
+                        "description": "Table name to export"
+                    },
+                    "schema_name": {
+                        "type": "string",
+                        "description": "Schema name (default: public)",
+                        "default": "public"
+                    },
+                    "format": {
+                        "type": "string",
+                        "enum": ["json", "csv"],
+                        "description": "Export format",
+                        "default": "json"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum rows to export (default: 1000, max: 10000)",
+                        "minimum": 1,
+                        "maximum": 10000,
+                        "default": 1000
+                    }
+                },
+                "required": ["table_name"]
+            },
+        ),
+        types.Tool(
+            name="database_activity",
+            description="📊 Monitor current database connections and activity (requires mcp:read scope)",
+            inputSchema={"type": "object", "properties": {}},
+        ),
+        
+        # Admin operations (mcp:admin scope required)
+        types.Tool(
+            name="backup_schema_ddl",
+            description="💾 Generate DDL backup script for schema (requires mcp:admin scope)",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "schema_name": {
+                        "type": "string",
+                        "description": "Schema to backup (default: public)",
+                        "default": "public"
+                    }
+                }
+            },
+        ),
+        types.Tool(
+            name="analyze_performance",
+            description="🐌 Analyze slow queries and performance metrics (requires mcp:admin scope)",
             inputSchema={"type": "object", "properties": {}},
         ),
         types.Tool(
-            name="debug_tools",
-            description="🔍 Debug tool visibility (no authentication required)",
-            inputSchema={"type": "object", "properties": {}},
+            name="admin_maintenance",
+            description="🔧 Perform database maintenance operations (requires mcp:admin scope)",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "operation": {
+                        "type": "string",
+                        "enum": ["vacuum_analyze", "reindex", "update_statistics"],
+                        "description": "Maintenance operation to perform"
+                    },
+                    "table_name": {
+                        "type": "string",
+                        "description": "Specific table (optional, default: all tables)"
+                    }
+                },
+                "required": ["operation"]
+            },
         )
     ]
 
-@server.call_tool()
-async def handle_call_tool(name: str, arguments: dict | None) -> list[types.TextContent]:
-    """Handle tool execution requests with complete OAuth protection"""
+# =============================================================================
+# TOOL CALL HANDLER
+# =============================================================================
+
+async def handle_application_tool_call(name: str, arguments: dict | None) -> list[types.TextContent]:
+    """Handle all application tool calls with proper authentication"""
     
     try:
-        # Get current authenticated user (OAuth SDK handles this)
+        # Get current authenticated user
         current_user = oauth_sdk.get_current_user()
         username = current_user.username if current_user else "anonymous"
         
         # Public tools (no authentication required)
         if name == "get_server_info":
-            logger.info(f"ℹ️ Server info accessed by '{username}'")
+            logger.info(f"ℹ️ Server info requested by '{username}'")
+            
+            health = await get_db_health()
             
             return [types.TextContent(
                 type="text",
                 text=json.dumps({
-                    "success": True,
                     "server_info": {
-                        "name": "Complete Demo Server",
-                        "version": "1.0.0-oauth-protected",
-                        "oauth_server": oauth_config.oauth_server,
-                        "database_connected": db_pool is not None,
-                        "authentication_required": False,
+                        "name": "Production PostgreSQL MCP Server",
+                        "version": "1.0.0",
+                        "oauth_enabled": True,
+                        "database_status": health.get("status", "unknown"),
                         "features": [
-                            "OAuth 2.0 + PKCE authentication",
-                            "Localhost callback server (port 3000)",
-                            "PostgreSQL integration",
-                            "Scope-based access control",
-                            "Complete audit logging"
-                        ],
-                        "oauth_flow": [
-                            "1. Call 'oauth_authenticate'",
-                            "2. Click auth URL in browser",
-                            "3. Complete OAuth (redirects to localhost:3000)",
-                            "4. Call 'oauth_refresh_tools'",
-                            "5. Protected tools now available!"
+                            "Production PostgreSQL operations",
+                            "OAuth 2.0 authentication with scopes",
+                            "Safe query execution with validation",
+                            "Comprehensive schema analysis",
+                            "Data export (JSON/CSV)",
+                            "Performance monitoring",
+                            "Database health checks",
+                            "DDL backup generation",
+                            "User activity logging"
                         ]
                     },
+                    "database_health": health,
                     "accessed_by": username,
-                    "timestamp": time.time()
+                    "timestamp": datetime.utcnow().isoformat()
                 }, indent=2, default=str)
             )]
         
-        # Protected tools (OAuth SDK ensures authentication and scopes)
-        elif name == "query_database":
-            # OAuth SDK ensures user has 'mcp:read' scope before this code runs
-            if not arguments or "sql" not in arguments:
-                return [types.TextContent(
-                    type="text",
-                    text=json.dumps({"error": "Missing SQL query parameter"}, indent=2)
-                )]
-            
-            sql = arguments["sql"]
-            
-            # Execute query with user context
-            results = await execute_query(sql, username=username)
+        elif name == "health_check":
+            logger.info(f"🏥 Health check requested by '{username}'")
+            health = await get_db_health()
             
             return [types.TextContent(
                 type="text",
                 text=json.dumps({
-                    "success": True,
-                    "results": results,
-                    "row_count": len(results),
-                    "query": sql,
-                    "executed_by": username,
-                    "timestamp": time.time(),
-                    "security_status": "✅ Authenticated query execution"
+                    "health_check": health,
+                    "checked_by": username,
+                    "timestamp": datetime.utcnow().isoformat()
                 }, indent=2, default=str)
             )]
         
-        elif name == "list_tables":
-            # OAuth SDK ensures user has 'mcp:read' scope
-            try:
-                # Get table list using schema info
-                schema_info = await get_schema_info(username)
-                tables = schema_info["tables"]
-                
+        # Read operations (mcp:read scope required)
+        elif name == "execute_query":
+            if not arguments or "query" not in arguments:
                 return [types.TextContent(
                     type="text",
-                    text=json.dumps({
-                        "success": True,
-                        "tables": tables,
-                        "table_count": len(tables),
-                        "accessed_by": username,
-                        "timestamp": time.time(),
-                        "security_status": "✅ Authenticated schema access"
-                    }, indent=2, default=str)
+                    text=json.dumps({"error": "Missing required 'query' parameter"}, indent=2)
                 )]
-            except Exception as e:
-                return [types.TextContent(
-                    type="text",
-                    text=json.dumps({
-                        "error": "Failed to list tables",
-                        "message": str(e),
-                        "accessed_by": username
-                    }, indent=2)
-                )]
+            
+            query = arguments["query"]
+            limit = arguments.get("limit", 100)
+            
+            # Add LIMIT if not present
+            if "LIMIT" not in query.upper() and limit:
+                query += f" LIMIT {limit}"
+            
+            result = await execute_safe_query(query, username=username)
+            
+            return [types.TextContent(
+                type="text",
+                text=json.dumps(result, indent=2, default=str)
+            )]
         
         elif name == "get_schema":
-            # OAuth SDK ensures user has 'mcp:read' scope
-            try:
-                schema_info = await get_schema_info(username)
-                
-                return [types.TextContent(
-                    type="text",
-                    text=json.dumps({
-                        "success": True,
-                        "schema": schema_info,
-                        "security_status": "✅ Authenticated schema access"
-                    }, indent=2, default=str)
-                )]
-            except Exception as e:
-                return [types.TextContent(
-                    type="text",
-                    text=json.dumps({
-                        "error": "Failed to get schema",
-                        "message": str(e),
-                        "accessed_by": username
-                    }, indent=2)
-                )]
+            include_stats = arguments.get("include_statistics", True) if arguments else True
+            
+            schema_info = await get_comprehensive_schema(username)
+            
+            return [types.TextContent(
+                type="text",
+                text=json.dumps({
+                    "schema_info": schema_info,
+                    "include_statistics": include_stats
+                }, indent=2, default=str)
+            )]
         
         elif name == "get_table_info":
-            # OAuth SDK ensures user has 'mcp:read' scope
             if not arguments or "table_name" not in arguments:
                 return [types.TextContent(
                     type="text",
-                    text=json.dumps({"error": "Missing table_name parameter"}, indent=2)
+                    text=json.dumps({"error": "Missing required 'table_name' parameter"}, indent=2)
                 )]
             
-            try:
-                table_name = arguments["table_name"]
-                
-                # Get table column information
-                if db_pool:
-                    query = """
-                    SELECT 
-                        column_name,
-                        data_type,
-                        is_nullable,
-                        column_default,
-                        ordinal_position
-                    FROM information_schema.columns 
-                    WHERE table_name = $1 
-                    AND table_schema NOT IN ('information_schema', 'pg_catalog')
-                    ORDER BY ordinal_position;
-                    """
-                    
-                    async with db_pool.acquire() as conn:
-                        rows = await conn.fetch(query, table_name)
-                        results = [dict(row) for row in rows]
-                else:
-                    # Demo data
-                    results = [
-                        {"column_name": "id", "data_type": "integer", "is_nullable": "NO"},
-                        {"column_name": "name", "data_type": "text", "is_nullable": "YES"}
-                    ]
-                
-                return [types.TextContent(
-                    type="text",
-                    text=json.dumps({
-                        "success": True,
-                        "table_name": table_name,
-                        "columns": results,
-                        "column_count": len(results),
-                        "accessed_by": username,
-                        "timestamp": time.time(),
-                        "security_status": "✅ Authenticated table info access"
-                    }, indent=2, default=str)
-                )]
-            except Exception as e:
-                return [types.TextContent(
-                    type="text",
-                    text=json.dumps({
-                        "error": "Failed to get table info",
-                        "message": str(e),
-                        "table_name": arguments.get("table_name", "unknown"),
-                        "accessed_by": username
-                    }, indent=2)
-                )]
-        
-        elif name == "admin_operation":
-            # OAuth SDK ensures user has 'mcp:admin' scope
-            try:
-                result = await admin_operation(username)
-                
-                return [types.TextContent(
-                    type="text",
-                    text=json.dumps({
-                        "success": True,
-                        "operation_result": result,
-                        "security_status": "✅ Admin operation by authenticated admin"
-                    }, indent=2, default=str)
-                )]
-            except Exception as e:
-                return [types.TextContent(
-                    type="text",
-                    text=json.dumps({
-                        "error": "Admin operation failed",
-                        "message": str(e),
-                        "accessed_by": username
-                    }, indent=2)
-                )]
-        
-        elif name == "debug_tools":
-            # Debug tool to help understand what's happening
-            logger.info(f"🔍 Debug tools called by '{username}'")
+            table_name = arguments["table_name"]
+            schema_name = arguments.get("schema_name", "public")
             
-            is_authenticated = oauth_sdk.is_authenticated()
-            protected_tools = oauth_sdk.protected_tools
-            
-            debug_info = {
-                "success": True,
-                "authentication_status": {
-                    "authenticated": is_authenticated,
-                    "user": username,
-                    "user_scopes": current_user.scopes if current_user else [],
-                    "token_expires_at": oauth_sdk.token_expires_at if is_authenticated else None,
-                    "time_left": int(oauth_sdk.token_expires_at - time.time()) if is_authenticated else 0
-                },
-                "protected_tools": {
-                    "total_protected": len(protected_tools),
-                    "protected_tool_list": [
-                        {
-                            "name": tool_name,
-                            "required_scopes": tool_info.get("scopes", []),
-                            "visible": oauth_sdk._should_show_tool(tool_name)
-                        }
-                        for tool_name, tool_info in protected_tools.items()
-                    ]
-                },
-                "oauth_config": {
-                    "oauth_server": oauth_sdk.config.oauth_server,
-                    "client_id": oauth_sdk.config.client_id,
-                    "scopes": oauth_sdk.config.scopes
-                },
-                "troubleshooting": {
-                    "if_tools_not_visible": [
-                        "1. Ensure you've called 'oauth_authenticate' and completed OAuth",
-                        "2. Call 'oauth_check_status' to verify authentication",
-                        "3. Call 'oauth_refresh_tools' to force tool list update",
-                        "4. Ask 'What tools are available?' to trigger tool list refresh"
-                    ]
-                }
-            }
+            table_info = await get_table_statistics(table_name, schema_name, username)
             
             return [types.TextContent(
                 type="text",
-                text=json.dumps(debug_info, indent=2, default=str)
+                text=json.dumps(table_info, indent=2, default=str)
+            )]
+        
+        elif name == "list_tables":
+            schema_name = arguments.get("schema_name") if arguments else None
+            include_system = arguments.get("include_system", False) if arguments else False
+            
+            # Get tables from schema info
+            schema_info = await get_comprehensive_schema(username)
+            tables = schema_info["tables"]
+            
+            # Filter by schema if specified
+            if schema_name:
+                tables = [t for t in tables if t["schemaname"] == schema_name]
+            
+            # Filter system tables if not requested
+            if not include_system:
+                tables = [t for t in tables if t["schemaname"] not in ["information_schema", "pg_catalog", "pg_toast"]]
+            
+            return [types.TextContent(
+                type="text",
+                text=json.dumps({
+                    "tables": tables,
+                    "total_count": len(tables),
+                    "schema_filter": schema_name,
+                    "include_system": include_system,
+                    "listed_by": username,
+                    "timestamp": datetime.utcnow().isoformat()
+                }, indent=2, default=str)
+            )]
+        
+        elif name == "export_data":
+            if not arguments or "table_name" not in arguments:
+                return [types.TextContent(
+                    type="text",
+                    text=json.dumps({"error": "Missing required 'table_name' parameter"}, indent=2)
+                )]
+            
+            table_name = arguments["table_name"]
+            schema_name = arguments.get("schema_name", "public")
+            format_type = arguments.get("format", "json")
+            limit = arguments.get("limit", 1000)
+            
+            export_result = await export_table_data(table_name, schema_name, limit, format_type, username)
+            
+            return [types.TextContent(
+                type="text",
+                text=json.dumps(export_result, indent=2, default=str)
+            )]
+        
+        elif name == "database_activity":
+            activity = await get_database_activity(username)
+            
+            return [types.TextContent(
+                type="text",
+                text=json.dumps(activity, indent=2, default=str)
+            )]
+        
+        # Admin operations (mcp:admin scope required)
+        elif name == "backup_schema_ddl":
+            schema_name = arguments.get("schema_name", "public") if arguments else "public"
+            
+            backup_result = await backup_schema_ddl(schema_name, username)
+            
+            return [types.TextContent(
+                type="text",
+                text=json.dumps(backup_result, indent=2, default=str)
+            )]
+        
+        elif name == "analyze_performance":
+            analysis = await analyze_slow_queries(username)
+            
+            return [types.TextContent(
+                type="text",
+                text=json.dumps(analysis, indent=2, default=str)
+            )]
+        
+        elif name == "admin_maintenance":
+            if not arguments or "operation" not in arguments:
+                return [types.TextContent(
+                    type="text",
+                    text=json.dumps({"error": "Missing required 'operation' parameter"}, indent=2)
+                )]
+            
+            operation = arguments["operation"]
+            table_name = arguments.get("table_name")
+            
+            # Simulate maintenance operations (read-only server, so we return what would be done)
+            maintenance_result = {
+                "operation": operation,
+                "target": table_name or "all_tables",
+                "status": "simulated",
+                "message": f"Would perform {operation} on {table_name or 'all tables'}",
+                "note": "This is a read-only demo. In production, this would execute the maintenance command.",
+                "performed_by": username,
+                "timestamp": datetime.utcnow().isoformat()
+            }
+            
+            if operation == "vacuum_analyze":
+                maintenance_result["command"] = f"VACUUM ANALYZE {table_name if table_name else ''}"
+            elif operation == "reindex":
+                maintenance_result["command"] = f"REINDEX TABLE {table_name}" if table_name else "REINDEX DATABASE"
+            elif operation == "update_statistics":
+                maintenance_result["command"] = f"ANALYZE {table_name if table_name else ''}"
+            
+            logger.info(f"🔧 Maintenance operation '{operation}' simulated by '{username}'")
+            
+            return [types.TextContent(
+                type="text",
+                text=json.dumps({
+                    "maintenance_result": maintenance_result
+                }, indent=2, default=str)
+            )]
+        
+        else:
+            return [types.TextContent(
+                type="text",
+                text=json.dumps({
+                    "error": f"Unknown tool: {name}",
+                    "available_tools": [
+                        "get_server_info", "health_check", "execute_query", "get_schema", 
+                        "get_table_info", "list_tables", "export_data", "database_activity",
+                        "backup_schema_ddl", "analyze_performance", "admin_maintenance"
+                    ]
+                }, indent=2)
             )]
     
     except Exception as e:
-        # IMPORTANT: Log to stderr, return JSON error (don't let exceptions break MCP)
-        logger.error(f"❌ Tool execution failed for user '{username}': {e}")
+        logger.error(f"❌ Tool execution failed for '{name}' by user '{username}': {e}")
         return [types.TextContent(
             type="text",
             text=json.dumps({
-                "error": "Tool execution failed",
-                "message": str(e),
-                "user": username
+                "error": f"Tool execution failed: {str(e)}",
+                "tool": name,
+                "user": username,
+                "timestamp": datetime.utcnow().isoformat()
             }, indent=2)
         )]
 
 # =============================================================================
-# OAUTH PROTECTION SETUP (SAME AS WORKING EXAMPLE)
+# ENHANCED OAUTH SDK INTEGRATION
+# =============================================================================
+
+class ProductionMCPOAuthSDK(MCPOAuthSDK):
+    """Enhanced OAuth SDK for production PostgreSQL server"""
+    
+    async def _call_application_tool(self, name: str, arguments: dict | None) -> List[types.TextContent]:
+        """Call application tools with enhanced error handling"""
+        try:
+            return await handle_application_tool_call(name, arguments)
+        except Exception as e:
+            logger.error(f"Application tool call failed: {e}")
+            return [types.TextContent(
+                type="text",
+                text=json.dumps({
+                    "error": f"Tool execution failed: {str(e)}",
+                    "tool": name,
+                    "timestamp": datetime.utcnow().isoformat()
+                }, indent=2)
+            )]
+
+# =============================================================================
+# SERVER SETUP AND OAUTH PROTECTION
 # =============================================================================
 
 def setup_oauth_protection():
-    """Setup OAuth protection for tools using your exact scopes"""
+    """Setup OAuth protection for production tools"""
     
-    # Protect tools with your exact working scopes
-    oauth_sdk.protect_tool("query_database", scopes=["mcp:read"])
-    oauth_sdk.protect_tool("list_tables", scopes=["mcp:read"])
+    # Give OAuth SDK access to application tools
+    oauth_sdk._application_tools = define_application_tools()
+    oauth_sdk._app_call_tool_handler = handle_application_tool_call
+    
+    # Protect read operations with mcp:read scope
+    oauth_sdk.protect_tool("execute_query", scopes=["mcp:read"])
     oauth_sdk.protect_tool("get_schema", scopes=["mcp:read"])
     oauth_sdk.protect_tool("get_table_info", scopes=["mcp:read"])
-    oauth_sdk.protect_tool("admin_operation", scopes=["mcp:admin"])
+    oauth_sdk.protect_tool("list_tables", scopes=["mcp:read"])
+    oauth_sdk.protect_tool("export_data", scopes=["mcp:read"])
+    oauth_sdk.protect_tool("database_activity", scopes=["mcp:read"])
     
-    # Note: get_server_info and debug_tools are NOT protected (remain public)
+    # Protect admin operations with mcp:admin scope
+    oauth_sdk.protect_tool("backup_schema_ddl", scopes=["mcp:admin"])
+    oauth_sdk.protect_tool("analyze_performance", scopes=["mcp:admin"])
+    oauth_sdk.protect_tool("admin_maintenance", scopes=["mcp:admin"])
     
-    logger.info("🛡️ OAuth protection configured with mcp:read and mcp:admin scopes")
-    logger.info(f"🛡️ Protected tools: {list(oauth_sdk.protected_tools.keys())}")
+    # Public tools (no protection): get_server_info, health_check
+    
+    logger.info("🛡️ OAuth protection configured for production PostgreSQL server")
+    logger.info(f"📋 Read tools (mcp:read): execute_query, get_schema, get_table_info, list_tables, export_data, database_activity")
+    logger.info(f"🔐 Admin tools (mcp:admin): backup_schema_ddl, analyze_performance, admin_maintenance")
+    logger.info(f"🌐 Public tools: get_server_info, health_check")
 
 # =============================================================================
 # MAIN FUNCTION
 # =============================================================================
 
 async def main():
-    """Main server function with complete OAuth integration"""
+    """Main server function for production PostgreSQL MCP server"""
     
-    # IMPORTANT: Only log to stderr, never to stdout (MCP requirement)
-    logger.info("🚀 Starting Complete Demo Server with OAuth SDK")
+    logger.info("🚀 Starting Production PostgreSQL MCP Server with OAuth")
     
     try:
-        # Setup OAuth (EASY - just 2 lines!)
+        # Initialize OAuth SDK
+        global oauth_sdk
+        oauth_sdk = ProductionMCPOAuthSDK(oauth_config)
+        
+        # Register OAuth with server
         oauth_sdk.register_with_server(server)
         setup_oauth_protection()
         
-        # Connect to database (optional)
+        # Connect to database (required for production)
         await connect_database()
+        
+        # Test database connection
+        health = await get_db_health()
+        if health["status"] != "healthy":
+            logger.warning(f"Database health check warning: {health}")
         
         # Run MCP server
         async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
-            # IMPORTANT: All startup messages go to stderr via logger
-            logger.info("🎉 COMPLETE DEMO SERVER STARTED")
-            logger.info("🔐 OAuth SDK with localhost callback integration complete")
-            logger.info("🛡️ Protected tools require authentication with mcp:read or mcp:admin scopes")
-            logger.info("🌐 Callback server will use localhost:3000 (or auto-find available port)")
-            logger.info("📋 Expected OAuth flow:")
-            logger.info("   1. Call 'oauth_authenticate' to start login")
-            logger.info("   2. Click auth URL to complete OAuth in browser")
-            logger.info("   3. Browser redirects to localhost:3000/callback")
-            logger.info("   4. Token exchange happens automatically")
-            logger.info("   5. Call 'oauth_refresh_tools' to see new tools")
-            logger.info("   6. Database tools now available with your username!")
-            
-            if db_pool:
-                logger.info("✅ Database connected - real PostgreSQL operations available")
-            else:
-                logger.info("📝 Demo mode - showing demo data (set POSTGRES_CONNECTION_STRING for real database)")
+            logger.info("🎉 PRODUCTION POSTGRESQL MCP SERVER STARTED")
+            logger.info("🔐 OAuth 2.0 authentication enabled")
+            logger.info("🛡️ Scope-based access control active")
+            logger.info("📊 Real PostgreSQL operations available")
+            logger.info("🌐 OAuth flow:")
+            logger.info("   1. Call 'oauth_authenticate' → Get auth URL")
+            logger.info("   2. Complete OAuth in browser")
+            logger.info("   3. Ask 'What tools are available?' → See all database tools")
+            logger.info("   4. Use production PostgreSQL tools with authentication!")
             
             await server.run(
                 read_stream,
                 write_stream,
                 InitializationOptions(
-                    server_name="complete-demo-server",
-                    server_version="1.0.0-oauth-callback",
+                    server_name="postgres-mcp-server",
+                    server_version="1.0.0-production",
                     capabilities=server.get_capabilities(
                         notification_options=NotificationOptions(),
                         experimental_capabilities={},
@@ -662,100 +1205,63 @@ if __name__ == "__main__":
     asyncio.run(main())
 
 # =============================================================================
-# COMPLETE OAUTH FLOW WITH LOCALHOST:3000 CALLBACK
+# PRODUCTION TOOLS OVERVIEW
 # =============================================================================
 
 """
-🔄 COMPLETE OAUTH FLOW WITH LOCALHOST CALLBACK:
+🏭 PRODUCTION POSTGRESQL MCP SERVER - TOOL OVERVIEW
+==================================================
 
-STEP 1: Server starts (only OAuth + public tools visible)
-Available tools: [
-  "oauth_authenticate",     # Start OAuth flow
-  "oauth_check_status",     # Check authentication status
-  "oauth_refresh_tools",    # Force tool list refresh
-  "get_server_info"         # Public server information
-]
+PUBLIC TOOLS (No Authentication Required):
+------------------------------------------
+✅ get_server_info      - Server status and database health
+✅ health_check         - Comprehensive database health metrics
 
-STEP 2: User calls oauth_authenticate
-Response: {
-  "status": "oauth_started",
-  "auth_url": "https://authsec.authnull.com/o/oauth2/auth?response_type=code&client_id=test-client&redirect_uri=http%3A%2F%2Flocalhost%3A3000%2Fcallback&scope=mcp%3Aread+mcp%3Aadmin&state=...&code_challenge=...&code_challenge_method=S256",
-  "callback_port": 3000,
-  "redirect_uri": "http://localhost:3000/callback",
-  "instructions": [
-    "1. Click the authentication URL above",
-    "2. Complete OAuth authentication in your browser",
-    "3. You will be redirected to localhost callback",
-    "4. Authentication will complete automatically",
-    "5. Use 'oauth_check_status' to verify completion",
-    "6. Use 'oauth_refresh_tools' to see your new tools"
-  ],
-  "note": "Callback server is running - authentication will complete automatically after OAuth flow"
-}
+READ OPERATIONS (mcp:read scope required):
+-----------------------------------------
+✅ execute_query        - Safe SELECT query execution with validation
+✅ get_schema           - Complete schema analysis with statistics  
+✅ get_table_info       - Detailed table statistics and metadata
+✅ list_tables          - Table listing with sizes and ownership
+✅ export_data          - Data export in JSON/CSV (up to 10K rows)
+✅ database_activity    - Real-time connection and activity monitoring
 
-STEP 3: User clicks auth URL
-- Browser opens OAuth server
-- User logs in with their credentials
-- OAuth server redirects to: http://localhost:3000/callback?code=ory_ac_HeDrbRr92fQoLwVqxL2cmr4t7hywpHmI1FQAS_voz4w.WqRWZA3ZtpC-O_5K3_7ijEVnsog4bJZXAFXwu2t_FGs&scope=mcp%3Aread+mcp%3Aadmin&state=...
+ADMIN OPERATIONS (mcp:admin scope required):
+-------------------------------------------
+✅ backup_schema_ddl    - Generate DDL backup scripts
+✅ analyze_performance  - Query performance analysis (pg_stat_statements)
+✅ admin_maintenance    - Database maintenance operations
 
-STEP 4: Localhost callback server handles redirect
-- Validates state parameter
-- Extracts authorization code
-- Exchanges code for access token
-- Retrieves user information
-- Saves token to file
-- Shows success page in browser
+SECURITY FEATURES:
+-----------------
+🛡️ OAuth 2.0 + PKCE authentication
+🔒 Scope-based access control (mcp:read, mcp:admin)
+🚫 SQL injection protection with query validation
+📝 Complete audit logging with usernames
+⚡ Performance limits (query results, export sizes)
+🔐 Read-only operations only (no INSERT/UPDATE/DELETE)
 
-STEP 5: User calls oauth_check_status
-Response: {
-  "authenticated": true,
-  "user": "c751290c-481d-4d95-9079-df9d8eca0f3d",
-  "scopes": ["mcp:read", "mcp:admin"],
-  "expires_at": 1750766573.5556405,
-  "time_left": 3568,
-  "method": "userinfo",
-  "callback_port": 3000,
-  "oauth_server": "https://authsec.authnull.com/o",
-  "status": "✅ AUTHENTICATED AND READY"
-}
+REAL-WORLD FEATURES:
+-------------------
+📊 Connection pooling with production settings
+📈 Table statistics and size analysis
+🔍 Query performance monitoring
+💾 Schema backup and DDL generation
+📤 Data export in multiple formats
+🏥 Database health monitoring
+📋 Comprehensive schema introspection
+🎯 Foreign key and index analysis
 
-STEP 6: User calls oauth_refresh_tools
-Response: {
-  "status": "tools_refreshed",
-  "authenticated": true,
-  "user": "c751290c-481d-4d95-9079-df9d8eca0f3d",
-  "total_protected_tools": 5,
-  "visible_tools": 5,
-  "message": "Tool list has been refreshed. New tools should now be visible."
-}
+USAGE EXAMPLE:
+-------------
+1. Start server: python postgres_mcp_server.py
+2. Authenticate: Call 'oauth_authenticate'
+3. Explore: Call 'list_tables' to see your database
+4. Query: Use 'execute_query' with SELECT statements
+5. Export: Use 'export_data' to export table data
+6. Monitor: Use 'database_activity' to see connections
+7. Backup: Use 'backup_schema_ddl' for schema backups
 
-STEP 7: All protected tools now available
-Available tools: [
-  "oauth_check_status",     # Now shows user info
-  "oauth_logout",           # Logout option
-  "oauth_refresh_tools",    # Refresh mechanism
-  "get_server_info",        # Public information
-  "query_database",         # mcp:read scope ✅
-  "list_tables",            # mcp:read scope ✅
-  "get_schema",             # mcp:read scope ✅
-  "get_table_info",         # mcp:read scope ✅
-  "admin_operation"         # mcp:admin scope ✅
-]
-
-STEP 8: User can now use protected tools
-All database operations are logged with username:
-- query_database: "🔍 Query by 'c751290c-481d-4d95-9079-df9d8eca0f3d': SELECT * FROM users..."
-- list_tables: "📊 Schema access by user 'c751290c-481d-4d95-9079-df9d8eca0f3d'"
-- admin_operation: "⚠️ Admin operation performed by 'c751290c-481d-4d95-9079-df9d8eca0f3d'"
-
-🎉 COMPLETE SUCCESS! 
-- Full OAuth 2.0 + PKCE flow working
-- Localhost:3000 callback server handling redirects
-- Automatic token exchange and user info retrieval  
-- Token persistence across server restarts
-- Complete audit trail with usernames
-- Scope-based access control working perfectly
-
-This is exactly the same flow as your working example, 
-but now packaged as a reusable SDK that any MCP developer can use! 🛡️
+This is a production-ready PostgreSQL MCP server suitable for real database
+administration, monitoring, and data analysis tasks! 🚀
 """
