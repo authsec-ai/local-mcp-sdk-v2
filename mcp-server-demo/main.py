@@ -7,7 +7,7 @@ Features practical tools for database administration, monitoring, and data analy
 
 Key Features:
 - ✅ Real database connection and operations
-- ✅ OAuth 2.0 authentication with scope-based access control
+- ✅ OAuth 2.1 authentication with scope-based access control
 - ✅ Production-ready SQL tools with safety checks
 - ✅ Database monitoring and health checks
 - ✅ User activity logging and audit trails
