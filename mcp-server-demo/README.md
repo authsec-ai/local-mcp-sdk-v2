@@ -39,7 +39,7 @@ This OAuth SDK provides complete OAuth 2.0 + PKCE authentication for Model Conte
 
 ### 1. Install Dependencies
 ```bash
-pip install aiohttp asyncio
+uv add aiohttp asyncio
 ```
 
 ### 2. Add OAuth to Your MCP Server
