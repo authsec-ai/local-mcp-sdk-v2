@@ -11,12 +11,14 @@ Key Fix: Store original handlers properly during registration and access them co
 
 import asyncio
 import logging
+import os # Import os for environment variables
 import json
 import tempfile
 import time
 import secrets
 import base64
 import hashlib
+import sys
 import socket
 from typing import Any, Dict, List, Optional, Callable
 from urllib.parse import urlencode
@@ -28,6 +30,11 @@ import mcp.types as types
 from mcp.server import Server
 
 # Configure logging to stderr only (MCP requirement)
+logging.basicConfig(
+    level=logging.INFO,
+    stream=sys.stderr,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger("mcp-oauth-sdk")
 
 @dataclass
@@ -60,32 +67,52 @@ class MCPOAuthSDK:
     ===================================================================
     """
     
-    def __init__(self, config: OAuthConfig):
-        self.config = config
+    def __init__(self, config: Optional[OAuthConfig] = None):
+        """
+        Initializes the MCPOAuthSDK.
+        
+        Args:
+            config (Optional[OAuthConfig]): An optional OAuthConfig object.
+                                           If None, the SDK will attempt to
+                                           create a default config from environment variables.
+        """
+        if config is None:
+            # Create default config from environment variables if not provided
+            self.config = create_hydra_config(
+                oauth_server=os.getenv("OAUTH_SERVER", "https://authsec.authnull.com/o"),
+                client_id=os.getenv("OAUTH_CLIENT_ID", "test-client"),
+                client_secret=os.getenv("OAUTH_CLIENT_SECRET", "test-secret"),
+                scopes=os.getenv("OAUTH_SCOPES", "mcp:read mcp:admin").split()
+            )
+            logger.info("OAuth SDK initialized with default configuration from environment variables.")
+        else:
+            self.config = config
+            logger.info("OAuth SDK initialized with provided configuration.")
         
         # OAuth endpoints with multiple fallbacks
-        self.auth_url = f"{config.oauth_server}/oauth2/auth"
-        self.token_url = f"{config.oauth_server}/oauth2/token"
+        self.auth_url = f"{self.config.oauth_server}/oauth2/auth"
+        self.token_url = f"{self.config.oauth_server}/oauth2/token"
         
         # Multiple introspection endpoints for different OAuth implementations
         self.introspection_urls = [
-            f"{config.oauth_server}/oauth2/introspect",
-            f"{config.oauth_server}/oauth/introspect",
-            f"{config.oauth_server}/oauth2/token/introspect",
-            f"{config.oauth_server}/introspect",
+            f"{self.config.oauth_server}/oauth2/introspect",
+            f"{self.config.oauth_server}/oauth/introspect",
+            f"{self.config.oauth_server}/oauth2/token/introspect",
+            f"{self.config.oauth_server}/token/introspect", # Added /token/introspect
+            f"{self.config.oauth_server}/introspect",
         ]
         
         # Multiple userinfo endpoints
         self.userinfo_urls = [
-            f"{config.oauth_server}/userinfo",
-            f"{config.oauth_server}/oauth2/userinfo", 
-            f"{config.oauth_server}/oauth/userinfo",
+            f"{self.config.oauth_server}/userinfo",
+            f"{self.config.oauth_server}/oauth2/userinfo", 
+            f"{self.config.oauth_server}/oauth/userinfo",
         ]
         
         # Dynamic callback configuration
         self.callback_port = None
         self.redirect_uri = None
-        self.token_file = Path(tempfile.gettempdir()) / config.token_file_name
+        self.token_file = Path(tempfile.gettempdir()) / self.config.token_file_name
         
         # Authentication state
         self.current_token: Optional[str] = None
@@ -113,10 +140,13 @@ class MCPOAuthSDK:
         self._last_auth_state = None
         self._tools_need_refresh = False
         
+        # Store application tools dynamically
+        self._application_tools: List[types.Tool] = []
+        
         # Load existing token
         self.load_stored_token()
         
-        logger.info(f"OAuth SDK initialized for {config.oauth_server}")
+        logger.info(f"OAuth SDK initialized for {self.config.oauth_server}")
     
     def register_with_server(self, mcp_server: Server):
         """Register OAuth functionality with MCP server - FIXED VERSION"""
@@ -152,8 +182,7 @@ class MCPOAuthSDK:
                     logger.info(f"✅ Found call_tool handler: {attr_name}")
                     break
         
-        # CRITICAL FIX: Store a reference to get the application tools
-        # We'll capture the tools defined in the main application
+        # CRITICAL FIX: Capture application tools dynamically from the server
         self._capture_application_tools()
         
         # Override list_tools handler with OAuth integration
@@ -207,65 +236,26 @@ class MCPOAuthSDK:
         logger.info("OAuth SDK registered with MCP server")
     
     def _capture_application_tools(self):
-        """FIXED: Capture the application tools that are defined in main.py"""
-        # Since we can see the expected tools from the logs, let's define them here
-        # This is a workaround for the handler access issue
-        self._application_tools = [
-            types.Tool(
-                name="get_server_info",
-                description="ℹ️ Get server information (no authentication required)",
-                inputSchema={"type": "object", "properties": {}},
-            ),
-            types.Tool(
-                name="query_database",
-                description="🗄️ Execute SQL query (requires mcp:read scope)",
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        "sql": {
-                            "type": "string",
-                            "description": "SQL SELECT query to execute"
-                        }
-                    },
-                    "required": ["sql"]
-                },
-            ),
-            types.Tool(
-                name="list_tables",
-                description="📊 List database tables (requires mcp:read scope)",
-                inputSchema={"type": "object", "properties": {}},
-            ),
-            types.Tool(
-                name="get_schema",
-                description="📋 Get complete database schema (requires mcp:read scope)",
-                inputSchema={"type": "object", "properties": {}},
-            ),
-            types.Tool(
-                name="get_table_info",
-                description="📝 Get detailed table information (requires mcp:read scope)",
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        "table_name": {
-                            "type": "string",
-                            "description": "Name of the table to get info for"
-                        }
-                    },
-                    "required": ["table_name"]
-                },
-            ),
-            types.Tool(
-                name="admin_operation",
-                description="⚙️ Perform admin operation (requires mcp:admin scope)",
-                inputSchema={"type": "object", "properties": {}},
-            ),
-            types.Tool(
-                name="debug_tools",
-                description="🔍 Debug tool visibility (no authentication required)",
-                inputSchema={"type": "object", "properties": {}},
-            )
-        ]
-        logger.info(f"📝 Captured {len(self._application_tools)} application tools")
+        """FIXED: Capture the application tools dynamically from the MCP server."""
+        if self.mcp_server and self.original_list_tools_handler:
+            try:
+                # Call the original list_tools handler to get the application's defined tools
+                # This assumes the original_list_tools_handler is capable of returning the tools
+                # without authentication context at this stage.
+                # If it requires authentication, this needs a different approach (e.g., a direct import
+                # of define_application_tools from main.py if main.py is structured for it).
+                
+                # For this specific case, main.py has define_application_tools()
+                # We will call it directly here.
+                from main import define_application_tools
+                self._application_tools = define_application_tools()
+                logger.info(f"📝 Dynamically captured {len(self._application_tools)} application tools from main.py")
+            except Exception as e:
+                logger.error(f"❌ Failed to dynamically capture application tools: {e}")
+                self._application_tools = [] # Fallback to empty list
+        else:
+            logger.warning("⚠️ MCP server or original list_tools handler not available to capture application tools.")
+            self._application_tools = []
     
     def protect_tool(self, tool_name: str, scopes: List[str] = None):
         """Protect a tool with OAuth authentication"""
@@ -858,7 +848,7 @@ class MCPOAuthSDK:
         tools.extend(oauth_tools)
         
         # FIXED: Get application tools from our captured list
-        if hasattr(self, '_application_tools') and self._application_tools:
+        if self._application_tools: # Use the dynamically captured tools
             logger.info(f"🛠️ Processing {len(self._application_tools)} application tools")
             
             for tool in self._application_tools:
@@ -1018,8 +1008,7 @@ class MCPOAuthSDK:
                         )]
             
             # FIXED: Call the application's tool handler
-            # Since we can't access the original handler reliably, we'll call the
-            # actual tool implementation by routing to the main application
+            # This will now directly call the handle_application_tool_call from main.py
             return await self._call_application_tool(name, arguments)
         
         except Exception as e:
@@ -1033,28 +1022,27 @@ class MCPOAuthSDK:
             )]
     
     async def _call_application_tool(self, name: str, arguments: dict | None) -> List[types.TextContent]:
-        """FIXED: Call application tools by delegating to the MCP server"""
-        # This is where we need to call the actual tool implementation
-        # Since the original handlers aren't accessible, we need to route the call
+        """FIXED: Call application tools by delegating to the application's specific handler."""
+        # This function is overridden in ProductionMCPOAuthSDK in main.py
+        # and directly calls handle_application_tool_call.
+        # This implementation here acts as a fallback or for clarity.
         
-        # Try to find and call the original handler
-        if self.original_call_tool_handler:
+        if hasattr(self, '_app_call_tool_handler') and self._app_call_tool_handler:
             try:
-                return await self.original_call_tool_handler(name, arguments)
+                return await self._app_call_tool_handler(name, arguments)
             except Exception as e:
-                logger.error(f"Original handler failed: {e}")
+                logger.error(f"Application's _app_call_tool_handler failed: {e}")
+                return [types.TextContent(
+                    type="text",
+                    text=json.dumps({
+                        "error": f"Application tool handler failed: {str(e)}",
+                        "tool": name,
+                        "timestamp": datetime.utcnow().isoformat()
+                    }, indent=2)
+                )]
         
-        # Fallback: Look for the handler in the server's registry
-        if hasattr(self.mcp_server, '_tool_handlers'):
-            for handler_name, handler_info in self.mcp_server._tool_handlers.items():
-                if hasattr(handler_info, 'func'):
-                    try:
-                        return await handler_info.func(name, arguments)
-                    except Exception as e:
-                        logger.error(f"Handler {handler_name} failed: {e}")
-                        continue
-        
-        # If we can't find the handler, return an error
+        # Fallback if _app_call_tool_handler is not set (should not happen with current main.py setup)
+        logger.error(f"Tool '{name}' handler not found in OAuth SDK. _app_call_tool_handler not set.")
         return [types.TextContent(
             type="text",
             text=json.dumps({

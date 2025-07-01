@@ -56,17 +56,193 @@ db_pool = None
 oauth_sdk = None
 
 # =============================================================================
+# APPLICATION TOOLS DEFINITION (MOVED TO TOP)
+# =============================================================================
+
+def define_application_tools():
+    """Define comprehensive PostgreSQL management tools"""
+    
+    return [
+        # Public tools (no authentication required)
+        types.Tool(
+            name="get_server_info",
+            description="ℹ️ Get PostgreSQL server information and connection status",
+            inputSchema={"type": "object", "properties": {}},
+        ),
+        types.Tool(
+            name="health_check",
+            description="🏥 Get comprehensive database health and performance metrics",
+            inputSchema={"type": "object", "properties": {}},
+        ),
+        
+        # Read operations (mcp:read scope required)
+        types.Tool(
+            name="execute_query",
+            description="🔍 Execute SELECT queries with safety validation (requires mcp:read scope)",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "SELECT query to execute (INSERT/UPDATE/DELETE not allowed)"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Optional result limit (default: 100, max: 1000)",
+                        "minimum": 1,
+                        "maximum": 1000,
+                        "default": 100
+                    }
+                },
+                "required": ["query"]
+            },
+        ),
+        types.Tool(
+            name="get_schema",
+            description="📋 Get comprehensive database schema with statistics (requires mcp:read scope)",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "include_statistics": {
+                        "type": "boolean",
+                        "description": "Include table sizes and row counts",
+                        "default": True
+                    }
+                }
+            },
+        ),
+        types.Tool(
+            name="get_table_info",
+            description="📊 Get detailed table information and statistics (requires mcp:read scope)",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "table_name": {
+                        "type": "string",
+                        "description": "Name of the table to analyze"
+                    },
+                    "schema_name": {
+                        "type": "string",
+                        "description": "Schema name (default: public)",
+                        "default": "public"
+                    }
+                },
+                "required": ["table_name"]
+            },
+        ),
+        types.Tool(
+            name="list_tables",
+            description="📝 List all tables with sizes and basic statistics (requires mcp:read scope)",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "schema_name": {
+                        "type": "string", 
+                        "description": "Filter by schema name (optional)"
+                    },
+                    "include_system": {
+                        "type": "boolean",
+                        "description": "Include system tables",
+                        "default": False
+                    }
+                }
+            },
+        ),
+        types.Tool(
+            name="export_data",
+            description="📤 Export table data in JSON or CSV format (requires mcp:read scope)",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "table_name": {
+                        "type": "string",
+                        "description": "Table name to export"
+                    },
+                    "schema_name": {
+                        "type": "string",
+                        "description": "Schema name (default: public)",
+                        "default": "public"
+                    },
+                    "format": {
+                        "type": "string",
+                        "enum": ["json", "csv"],
+                        "description": "Export format",
+                        "default": "json"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum rows to export (default: 1000, max: 10000)",
+                        "minimum": 1,
+                        "maximum": 10000,
+                        "default": 1000
+                    }
+                },
+                "required": ["table_name"]
+            },
+        ),
+        types.Tool(
+            name="database_activity",
+            description="📊 Monitor current database connections and activity (requires mcp:read scope)",
+            inputSchema={"type": "object", "properties": {}},
+        ),
+        
+        # Admin operations (mcp:admin scope required)
+        types.Tool(
+            name="backup_schema_ddl",
+            description="💾 Generate DDL backup script for schema (requires mcp:admin scope)",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "schema_name": {
+                        "type": "string",
+                        "description": "Schema to backup (default: public)",
+                        "default": "public"
+                    }
+                }
+            },
+        ),
+        types.Tool(
+            name="analyze_performance",
+            description="🐌 Analyze slow queries and performance metrics (requires mcp:admin scope)",
+            inputSchema={"type": "object", "properties": {}},
+        ),
+        types.Tool(
+            name="admin_maintenance",
+            description="🔧 Perform database maintenance operations (requires mcp:admin scope)",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "operation": {
+                        "type": "string",
+                        "enum": ["vacuum_analyze", "reindex", "update_statistics"],
+                        "description": "Maintenance operation to perform"
+                    },
+                    "table_name": {
+                        "type": "string",
+                        "description": "Specific table (optional, default: all tables)"
+                    }
+                },
+                "required": ["operation"]
+            },
+        )
+    ]
+
+# =============================================================================
 # OAUTH CONFIGURATION
 # =============================================================================
 
-oauth_config = create_hydra_config(
-    oauth_server=os.getenv("OAUTH_SERVER", "https://authsec.authnull.com/o"),
-    client_id=os.getenv("OAUTH_CLIENT_ID", "test-client"),
-    client_secret=os.getenv("OAUTH_CLIENT_SECRET", "test-secret"),
-    scopes=["mcp:read", "mcp:admin"]
-)
+# The oauth_config is now optional when initializing MCPOAuthSDK
+# If you want to explicitly define it here, you can, otherwise, the SDK will
+# try to read from environment variables.
+# oauth_config = create_hydra_config(
+#     oauth_server=os.getenv("OAUTH_SERVER", "https://authsec.authnull.com/o"),
+#     client_id=os.getenv("OAUTH_CLIENT_ID", "test-client"),
+#     client_secret=os.getenv("OAUTH_CLIENT_SECRET", "test-secret"),
+#     scopes=["mcp:read", "mcp:admin"]
+# )
 
-oauth_sdk = MCPOAuthSDK(oauth_config)
+# Initialize OAuth SDK (now with optional config)
+oauth_sdk = MCPOAuthSDK() # No config passed, it will use environment variables
 
 # =============================================================================
 # DATABASE CONNECTION AND HEALTH
@@ -666,178 +842,6 @@ async def analyze_slow_queries(username: str = None) -> Dict[str, Any]:
             }
 
 # =============================================================================
-# APPLICATION TOOLS DEFINITION
-# =============================================================================
-
-def define_application_tools():
-    """Define comprehensive PostgreSQL management tools"""
-    
-    return [
-        # Public tools (no authentication required)
-        types.Tool(
-            name="get_server_info",
-            description="ℹ️ Get PostgreSQL server information and connection status",
-            inputSchema={"type": "object", "properties": {}},
-        ),
-        types.Tool(
-            name="health_check",
-            description="🏥 Get comprehensive database health and performance metrics",
-            inputSchema={"type": "object", "properties": {}},
-        ),
-        
-        # Read operations (mcp:read scope required)
-        types.Tool(
-            name="execute_query",
-            description="🔍 Execute SELECT queries with safety validation (requires mcp:read scope)",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "SELECT query to execute (INSERT/UPDATE/DELETE not allowed)"
-                    },
-                    "limit": {
-                        "type": "integer",
-                        "description": "Optional result limit (default: 100, max: 1000)",
-                        "minimum": 1,
-                        "maximum": 1000,
-                        "default": 100
-                    }
-                },
-                "required": ["query"]
-            },
-        ),
-        types.Tool(
-            name="get_schema",
-            description="📋 Get comprehensive database schema with statistics (requires mcp:read scope)",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "include_statistics": {
-                        "type": "boolean",
-                        "description": "Include table sizes and row counts",
-                        "default": True
-                    }
-                }
-            },
-        ),
-        types.Tool(
-            name="get_table_info",
-            description="📊 Get detailed table information and statistics (requires mcp:read scope)",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "table_name": {
-                        "type": "string",
-                        "description": "Name of the table to analyze"
-                    },
-                    "schema_name": {
-                        "type": "string",
-                        "description": "Schema name (default: public)",
-                        "default": "public"
-                    }
-                },
-                "required": ["table_name"]
-            },
-        ),
-        types.Tool(
-            name="list_tables",
-            description="📝 List all tables with sizes and basic statistics (requires mcp:read scope)",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "schema_name": {
-                        "type": "string", 
-                        "description": "Filter by schema name (optional)"
-                    },
-                    "include_system": {
-                        "type": "boolean",
-                        "description": "Include system tables",
-                        "default": False
-                    }
-                }
-            },
-        ),
-        types.Tool(
-            name="export_data",
-            description="📤 Export table data in JSON or CSV format (requires mcp:read scope)",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "table_name": {
-                        "type": "string",
-                        "description": "Table name to export"
-                    },
-                    "schema_name": {
-                        "type": "string",
-                        "description": "Schema name (default: public)",
-                        "default": "public"
-                    },
-                    "format": {
-                        "type": "string",
-                        "enum": ["json", "csv"],
-                        "description": "Export format",
-                        "default": "json"
-                    },
-                    "limit": {
-                        "type": "integer",
-                        "description": "Maximum rows to export (default: 1000, max: 10000)",
-                        "minimum": 1,
-                        "maximum": 10000,
-                        "default": 1000
-                    }
-                },
-                "required": ["table_name"]
-            },
-        ),
-        types.Tool(
-            name="database_activity",
-            description="📊 Monitor current database connections and activity (requires mcp:read scope)",
-            inputSchema={"type": "object", "properties": {}},
-        ),
-        
-        # Admin operations (mcp:admin scope required)
-        types.Tool(
-            name="backup_schema_ddl",
-            description="💾 Generate DDL backup script for schema (requires mcp:admin scope)",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "schema_name": {
-                        "type": "string",
-                        "description": "Schema to backup (default: public)",
-                        "default": "public"
-                    }
-                }
-            },
-        ),
-        types.Tool(
-            name="analyze_performance",
-            description="🐌 Analyze slow queries and performance metrics (requires mcp:admin scope)",
-            inputSchema={"type": "object", "properties": {}},
-        ),
-        types.Tool(
-            name="admin_maintenance",
-            description="🔧 Perform database maintenance operations (requires mcp:admin scope)",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "operation": {
-                        "type": "string",
-                        "enum": ["vacuum_analyze", "reindex", "update_statistics"],
-                        "description": "Maintenance operation to perform"
-                    },
-                    "table_name": {
-                        "type": "string",
-                        "description": "Specific table (optional, default: all tables)"
-                    }
-                },
-                "required": ["operation"]
-            },
-        )
-    ]
-
-# =============================================================================
 # TOOL CALL HANDLER
 # =============================================================================
 
@@ -1092,6 +1096,7 @@ class ProductionMCPOAuthSDK(MCPOAuthSDK):
     async def _call_application_tool(self, name: str, arguments: dict | None) -> List[types.TextContent]:
         """Call application tools with enhanced error handling"""
         try:
+            # Directly call the handle_application_tool_call from main.py
             return await handle_application_tool_call(name, arguments)
         except Exception as e:
             logger.error(f"Application tool call failed: {e}")
@@ -1112,8 +1117,9 @@ def setup_oauth_protection():
     """Setup OAuth protection for production tools"""
     
     # Give OAuth SDK access to application tools
-    oauth_sdk._application_tools = define_application_tools()
-    oauth_sdk._app_call_tool_handler = handle_application_tool_call
+    # This will be dynamically fetched by the SDK now
+    # oauth_sdk._application_tools = define_application_tools() 
+    oauth_sdk._app_call_tool_handler = handle_application_tool_call # Keep this for direct call
     
     # Protect read operations with mcp:read scope
     oauth_sdk.protect_tool("execute_query", scopes=["mcp:read"])
@@ -1147,7 +1153,9 @@ async def main():
     try:
         # Initialize OAuth SDK
         global oauth_sdk
-        oauth_sdk = ProductionMCPOAuthSDK(oauth_config)
+        # Now, you can initialize without passing oauth_config explicitly
+        # The SDK will try to read from environment variables by default.
+        oauth_sdk = ProductionMCPOAuthSDK() 
         
         # Register OAuth with server
         oauth_sdk.register_with_server(server)
