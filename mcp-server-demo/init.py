@@ -133,17 +133,33 @@ def create_env_file(conn_str: str):
         with open(env_path, "w", encoding="utf-8") as f:
             f.writelines(existing_lines)
 
-def update_claude_config(conn_str: str):
-    import json
+def get_claude_config_path():
+    """
+    Returns the path to the Claude Desktop config directory for the current platform.
+    """
+    system = platform.system()
 
+    if system == "Windows":
+        appdata = os.getenv("APPDATA")
+        return Path(appdata) / "Claude" if appdata else None
+    elif system == "Darwin":  # macOS
+        return Path.home() / "Library/Application Support/Claude"
+    elif system == "Linux":
+        return Path.home() / ".config/Claude"
+    else:
+        return None
+
+def update_claude_config(conn_str: str):
+    """
+    Updates the Claude Desktop config with a new MCP server entry using the given Postgres connection string.
+    """
     print("[*] Checking for Claude Desktop config...")
 
-    appdata = os.getenv("APPDATA")  # e.g., C:\Users\adipa\AppData\Roaming
-    if not appdata:
-        print("[!] APPDATA not found. Cannot locate Claude config.")
+    claude_dir = get_claude_config_path()
+    if not claude_dir:
+        print("[!] Unable to determine Claude config path for this OS. Skipping config update.")
         return
 
-    claude_dir = Path(appdata) / "Claude"
     config_file = claude_dir / "claude_desktop_config.json"
 
     if not claude_dir.exists():
@@ -153,7 +169,8 @@ def update_claude_config(conn_str: str):
     if not config_file.exists():
         print("[!] Config file not found. Creating a new one...")
 
-    repo_path = str(ROOT_DIR).replace("\\", "/")  # for JSON compatibility
+    # Format the repo path in POSIX-style (important for JSON)
+    repo_path = str(ROOT_DIR).replace("\\", "/")
 
     new_config = {
         "mcpServers": {
