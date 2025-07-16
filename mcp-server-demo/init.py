@@ -57,10 +57,11 @@ mcp[cli]>=1.10.0
 def install_dependencies():
     print("[+] Installing dependencies in uv environment...")
     try:
-        subprocess.check_call(["uv", "pip", "install", "-r", str(REQUIREMENTS_FILE)])
+        subprocess.check_call(["uv", "pip", "install", "-r", str(REQUIREMENTS_FILE), "--system"])
     except subprocess.CalledProcessError as e:
         print(f"[x] Dependency installation failed: {e}")
         sys.exit(1)
+
 
 def ensure_scripts_folder():
     SCRIPTS_DIR.mkdir(exist_ok=True)
