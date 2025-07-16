@@ -31,16 +31,16 @@ from typing import Any, Dict, List, Optional, Union
 from datetime import datetime, timedelta
 import tempfile
 from pathlib import Path
-
 import asyncpg
 from mcp.server.models import InitializationOptions
 import mcp.types as types
 from mcp.server import NotificationOptions, Server
 import mcp.server.stdio
+from dotenv import load_dotenv
+load_dotenv(override=True)
 
 # Import the OAuth SDK
-from .sdk import MCPOAuthSDK, create_hydra_config
-
+from mcp_outh_sdk import MCPOAuthSDK, create_hydra_config
 
 # Configure logging to stderr only (MCP requirement)
 logging.basicConfig(

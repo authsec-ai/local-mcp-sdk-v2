@@ -39,6 +39,7 @@ dependencies = [
     "aiohttp>=3.12.13",
     "asyncpg>=0.30.0",
     "mcp[cli]>=1.10.0",
+    "git+https://github.com/authsec-ai/mcp_oauth_sdk.git"
 ]
 """
     PYPROJECT_FILE.write_text(content.strip() + "\n")
@@ -50,7 +51,6 @@ def install_dependencies():
     except subprocess.CalledProcessError as e:
         print(f"[x] Dependency installation failed: {e}")
         sys.exit(1)
-
 
 def ensure_scripts_folder():
     SCRIPTS_DIR.mkdir(exist_ok=True)
@@ -108,7 +108,6 @@ def prompt_connection_string():
             return conn_str
         else:
             print("[!] Connection string cannot be empty. Please try again.")
-
 
 def create_env_file(conn_str: str):
     env_path = ROOT_DIR / ".env"
