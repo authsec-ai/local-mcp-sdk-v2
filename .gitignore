@@ -6,3 +6,4 @@ pyproject.toml
 # Ignore specific subfolders or files
 /mcp-server-demo/scripts/
 /mcp-server-demo/pyproject.toml
+/mcp-server-demo/__pycache__/
