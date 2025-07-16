@@ -25,20 +25,26 @@ If you are building an MCP server and need to add:
 
 To integrate this SDK into your MCP server, you need:
 
-- Python 3.8+
+- Python 3.10+
 - `aiohttp`: For handling HTTP requests and the OAuth callback server
 - `mcp-server`: The core Model Context Protocol server library
 
 ## Installation
 
-1. **Obtain the SDK**: Copy the `mcp_oauth_sdk.py` file into your MCP server project directory
-
-2. **Install Python dependencies**:
+1. **Clone the repository**:
    ```bash
-   pip install uv
-   uv add aiohttp mcp-server
+   git clone https://github.com/authsec-ai/local-mcp-sdk-v2.git
    ```
-
+2. **Change directory**
+   ```bash
+   cd mcp-server-demo
+   ```
+3. **Setup dependencies**:
+   ```bash
+   python init.py
+   ```
+4. **Open Claude Desktop Client for authentication**
+   
 ## Integration Guide
 
 ### Step 1: Define Your MCP Server's Contract
