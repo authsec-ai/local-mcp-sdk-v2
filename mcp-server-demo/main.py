@@ -39,7 +39,8 @@ from mcp.server import NotificationOptions, Server
 import mcp.server.stdio
 
 # Import the OAuth SDK
-from mcp_oauth_sdk import MCPOAuthSDK, create_hydra_config
+from .sdk import MCPOAuthSDK, create_hydra_config
+
 
 # Configure logging to stderr only (MCP requirement)
 logging.basicConfig(
