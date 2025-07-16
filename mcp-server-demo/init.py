@@ -6,13 +6,11 @@ import sys
 from pathlib import Path
 from shutil import which
 from dotenv import load_dotenv
-
 load_dotenv(override=True)
 
 ROOT_DIR = Path(__file__).resolve().parent
 SCRIPTS_DIR = ROOT_DIR / "scripts"
 PYPROJECT_FILE = ROOT_DIR / "pyproject.toml"
-REQUIREMENTS_FILE = ROOT_DIR / "requirements.txt"
 
 def check_uv():
     if which("uv") is None:
@@ -40,36 +38,28 @@ requires-python = ">=3.13"
 dependencies = [
     "aiohttp>=3.12.13",
     "asyncpg>=0.30.0",
-    "mcp[cli]>=1.10.0",
-    "git+https://github.com/yourusername/mcp_oauth_sdk.git"
+    "mcp[cli]>=1.10.0"
 ]
 """
     PYPROJECT_FILE.write_text(content.strip() + "\n")
 
-    # Also create requirements.txt for uv pip install
-    print("[+] Creating requirements.txt for uv...")
-    REQUIREMENTS_FILE.write_text("""git+https://github.com/yourusername/mcp_oauth_sdk.git
-aiohttp>=3.12.13
-asyncpg>=0.30.0
-mcp[cli]>=1.10.0
-""")
-
 def install_dependencies():
-    print("[+] Installing dependencies in uv environment...")
+    print("[+] Installing dependencies globally using uv with --system...")
     try:
-        subprocess.check_call(["uv", "pip", "install", "-r", str(REQUIREMENTS_FILE), "--system"])
+        subprocess.check_call(["uv", "pip", "install", "-r", str(PYPROJECT_FILE), "--system"])
     except subprocess.CalledProcessError as e:
         print(f"[x] Dependency installation failed: {e}")
         sys.exit(1)
 
-
 def ensure_scripts_folder():
     SCRIPTS_DIR.mkdir(exist_ok=True)
+
     default_scripts = {
         "setup_windows.bat": "@echo off\nREM Windows setup script\n",
         "setup_linux.sh": "#!/bin/bash\n# Linux setup script\n",
         "setup_macos.sh": "#!/bin/bash\n# macOS setup script\n"
     }
+
     for filename, content in default_scripts.items():
         script_path = SCRIPTS_DIR / filename
         if not script_path.exists():
@@ -85,14 +75,17 @@ def run_os_script():
         "Linux": "setup_linux.sh",
         "Darwin": "setup_macos.sh"
     }
+
     script_name = script_map.get(system)
     if not script_name:
         print("[x] Unsupported OS.")
         return
+
     script_path = SCRIPTS_DIR / script_name
     if not script_path.exists():
         print(f"[!] Script not found: {script_path}")
         return
+
     print(f"[+] Running OS-specific setup: {script_path}")
     try:
         if system == "Windows":
@@ -106,6 +99,7 @@ def run_os_script():
 def prompt_connection_string():
     print("[*] Please enter your Postgres connection string.")
     print("    Format: postgresql://user:password@host:port/database")
+
     while True:
         conn_str = input("> ").strip()
         if conn_str:
@@ -121,37 +115,61 @@ def create_env_file(conn_str: str):
         "DEBUG=True",
         f"POSTGRES_CONNECTION_STRING={conn_str}"
     ]
+
     if not env_path.exists():
         print("[+] Creating .env file...")
         env_path.write_text("\n".join(lines) + "\n")
     else:
-        print("[+] Updating existing .env file...")
+        print("[+] Updating existing .env file with new POSTGRES_CONNECTION_STRING...")
         with open(env_path, "r", encoding="utf-8") as f:
-            existing = f.readlines()
-        existing = [line for line in existing if not line.startswith("POSTGRES_CONNECTION_STRING=")]
-        existing += [f"POSTGRES_CONNECTION_STRING={conn_str}\n"]
+            existing_lines = f.readlines()
+
+        # Remove old POSTGRES_CONNECTION_STRING lines if any
+        existing_lines = [line for line in existing_lines if not line.startswith("POSTGRES_CONNECTION_STRING=")]
+        existing_lines += [f"POSTGRES_CONNECTION_STRING={conn_str}\n"]
+
         with open(env_path, "w", encoding="utf-8") as f:
-            f.writelines(existing)
+            f.writelines(existing_lines)
 
 def get_claude_config_path():
+    """
+    Returns the path to the Claude Desktop config directory for the current platform.
+    """
     system = platform.system()
+
     if system == "Windows":
         appdata = os.getenv("APPDATA")
         return Path(appdata) / "Claude" if appdata else None
-    elif system == "Darwin":
+    elif system == "Darwin":  # macOS
         return Path.home() / "Library/Application Support/Claude"
     elif system == "Linux":
         return Path.home() / ".config/Claude"
-    return None
+    else:
+        return None
 
 def update_claude_config(conn_str: str):
-    print("[*] Updating Claude Desktop config...")
+    """
+    Updates the Claude Desktop config with a new MCP server entry using the given Postgres connection string.
+    """
+    print("[*] Checking for Claude Desktop config...")
+
     claude_dir = get_claude_config_path()
     if not claude_dir:
-        print("[!] Could not determine Claude config path.")
+        print("[!] Unable to determine Claude config path for this OS. Skipping config update.")
         return
+
     config_file = claude_dir / "claude_desktop_config.json"
+
+    if not claude_dir.exists():
+        print("[!] Claude Desktop folder not found. Skipping config update.")
+        return
+
+    if not config_file.exists():
+        print("[!] Config file not found. Creating a new one...")
+
+    # Format the repo path in POSIX-style (important for JSON)
     repo_path = str(ROOT_DIR).replace("\\", "/")
+
     new_config = {
         "mcpServers": {
             "postgres": {
@@ -169,11 +187,11 @@ def update_claude_config(conn_str: str):
             }
         }
     }
+
     try:
-        config_file.parent.mkdir(parents=True, exist_ok=True)
         with open(config_file, "w", encoding="utf-8") as f:
             json.dump(new_config, f, indent=2)
-        print(f"[+] Updated Claude config at: {config_file}")
+        print(f"[+] Updated Claude Desktop config at: {config_file}")
     except Exception as e:
         print(f"[x] Failed to update Claude config: {e}")
 
@@ -187,6 +205,7 @@ def main():
     conn_str = prompt_connection_string()
     create_env_file(conn_str)
     update_claude_config(conn_str)
+
     print("\n[✔] Setup complete.")
 
 if __name__ == "__main__":
