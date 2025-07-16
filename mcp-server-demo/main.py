@@ -40,7 +40,7 @@ from dotenv import load_dotenv
 load_dotenv(override=True)
 
 # Import the OAuth SDK
-from mcp_outh_sdk import MCPOAuthSDK, create_hydra_config
+from mcp_oauth_sdk import MCPOAuthSDK, create_hydra_config
 
 # Configure logging to stderr only (MCP requirement)
 logging.basicConfig(

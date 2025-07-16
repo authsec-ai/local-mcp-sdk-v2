@@ -38,8 +38,7 @@ requires-python = ">=3.13"
 dependencies = [
     "aiohttp>=3.12.13",
     "asyncpg>=0.30.0",
-    "mcp[cli]>=1.10.0",
-    "git+https://github.com/authsec-ai/mcp_oauth_sdk.git"
+    "mcp[cli]>=1.10.0"
 ]
 """
     PYPROJECT_FILE.write_text(content.strip() + "\n")
