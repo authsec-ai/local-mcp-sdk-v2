@@ -5,8 +5,6 @@ import subprocess
 import sys
 from pathlib import Path
 from shutil import which
-from dotenv import load_dotenv
-load_dotenv(override=True)
 
 ROOT_DIR = Path(__file__).resolve().parent
 SCRIPTS_DIR = ROOT_DIR / "scripts"
@@ -195,6 +193,28 @@ def update_claude_config(conn_str: str):
     except Exception as e:
         print(f"[x] Failed to update Claude config: {e}")
 
+def setup_windows_venv():
+    """
+    For Windows: create a virtual environment and install from requirements.txt.
+    """
+    print("[+] Creating uv virtual environment...")
+    try:
+        subprocess.check_call(["uv", "venv"])
+    except subprocess.CalledProcessError as e:
+        print(f"[x] Failed to create uv venv: {e}")
+        sys.exit(1)
+
+    req_file = ROOT_DIR / "requirements.txt"
+    if req_file.exists():
+        print("[+] Installing dependencies from requirements.txt...")
+        try:
+            subprocess.check_call(["uv", "pip", "install", "-r", str(req_file)])
+        except subprocess.CalledProcessError as e:
+            print(f"[x] Failed to install from requirements.txt: {e}")
+            sys.exit(1)
+    else:
+        print("[!] requirements.txt not found, skipping installation.")
+
 def main():
     print("[*] Initializing project environment...")
     check_uv()
@@ -205,6 +225,8 @@ def main():
     conn_str = prompt_connection_string()
     create_env_file(conn_str)
     update_claude_config(conn_str)
+    if platform.system() == "Windows":
+        setup_windows_venv()
 
     print("\n[✔] Setup complete.")
 
