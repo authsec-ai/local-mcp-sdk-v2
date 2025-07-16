@@ -195,7 +195,7 @@ def update_claude_config(conn_str: str):
 
 def setup_windows_venv():
     """
-    For Windows: create a virtual environment and install from requirements.txt.
+    For Windows: create a virtual environment and install mcp_oauth_sdk.
     """
     print("[+] Creating uv virtual environment...")
     try:
@@ -204,16 +204,13 @@ def setup_windows_venv():
         print(f"[x] Failed to create uv venv: {e}")
         sys.exit(1)
 
-    req_file = ROOT_DIR / "requirements.txt"
-    if req_file.exists():
-        print("[+] Installing dependencies from requirements.txt...")
-        try:
-            subprocess.check_call(["uv", "pip", "install", "-r", str(req_file)])
-        except subprocess.CalledProcessError as e:
-            print(f"[x] Failed to install from requirements.txt: {e}")
-            sys.exit(1)
-    else:
-        print("[!] requirements.txt not found, skipping installation.")
+    print("[+] Installing mcp_oauth_sdk...")
+
+    try:
+        subprocess.check_call(["uv", "pip", "install", "git+https://github.com/authsec-ai/mcp_oauth_sdk.git"])
+    except subprocess.CalledProcessError as e:
+        print(f"[x] Failed to install mcp_oauth_sdk: {e}")
+        sys.exit(1)
 
 def main():
     print("[*] Initializing project environment...")
